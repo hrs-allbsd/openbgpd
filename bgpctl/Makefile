@@ -7,7 +7,6 @@ SRCS=	bgpctl.c parser.c util.c timer.c log.c
 SRCS+=	irrfilter.c whois.c irr_asset.c irr_prefix.c irr_output.c
 SRCS+=	irr_parser.c mrtparser.c
 SRCS+=	fmt_scaled.c imsg.c imsg-buffer.c
-SRCS+=	timespec.c
 CFLAGS+= -Wall
 CFLAGS+= -Wstrict-prototypes -Wmissing-prototypes
 CFLAGS+= -Wmissing-declarations
