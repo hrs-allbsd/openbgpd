@@ -25,8 +25,10 @@
 #include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#if !defined(__FreeBSD__) /* FreeBSD has no mpls support. */
 #include <netmpls/mpls.h>
-
+#endif
+	
 #include <ctype.h>
 #include <err.h>
 #include <unistd.h>
@@ -34,6 +36,9 @@
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
+#if defined(__FreeBSD__)
+#include <stdlib.h>
+#endif
 #include <string.h>
 #include <syslog.h>
 
@@ -167,7 +172,7 @@ typedef struct {
 %token	RDOMAIN RD EXPORTTRGT IMPORTTRGT
 %token	RDE RIB EVALUATE IGNORE COMPARE
 %token	GROUP NEIGHBOR NETWORK
-%token	REMOTEAS DESCR LOCALADDR MULTIHOP PASSIVE MAXPREFIX RESTART
+%token	REMOTEAS DESCR LLIFACE LOCALADDR MULTIHOP PASSIVE MAXPREFIX RESTART
 %token	ANNOUNCE CAPABILITIES REFRESH AS4BYTE CONNECTRETRY
 %token	DEMOTE ENFORCE NEIGHBORAS REFLECTOR DEPEND DOWN SOFTRECONFIG
 %token	DUMP IN OUT SOCKET RESTRICTED
@@ -544,6 +549,10 @@ conf_main	: AS as4number		{
 			free($4);
 		}
 		| RTABLE NUMBER {
+#if defined(__FreeBSD__)	/* FreeBSD does not support RTABLE */
+			yyerror("rtable id not supported in FreeBSD, yet");
+			YYERROR;
+#else
 			struct rde_rib *rr;
 			if (ktable_exists($2, NULL) != 1) {
 				yyerror("rtable id %lld does not exist", $2);
@@ -553,6 +562,7 @@ conf_main	: AS as4number		{
 			if (rr == NULL)
 				fatalx("RTABLE can not find the main RIB!");
 			rr->rtableid = $2;
+#endif /* defined(__FreeBSD__) */
 		}
 		| CONNECTRETRY NUMBER {
 			if ($2 > USHRT_MAX || $2 < 1) {
@@ -672,7 +682,7 @@ prefix		: STRING '/' NUMBER	{
 				free($1);
 				YYERROR;
 			}
-			if (asprintf(&s, "%s/%lld", $1, $3) == -1)
+			if (asprintf(&s, "%s/%lld", $1, (long long int)$3) == -1)
 				fatal(NULL);
 			free($1);
 
@@ -691,7 +701,7 @@ prefix		: STRING '/' NUMBER	{
 				yyerror("bad prefix %lld/%lld", $1, $3);
 				YYERROR;
 			}
-			if (asprintf(&s, "%lld/%lld", $1, $3) == -1)
+			if (asprintf(&s, "%lld/%lld", (long long int)$1, (long long int)$3) == -1)
 				fatal(NULL);
 
 			if (!host(s, &$$.prefix, &$$.len)) {
@@ -957,6 +967,17 @@ peeropts	: REMOTEAS as4number	{
 			}
 			free($2);
 		}
+		| LLIFACE string	{
+			if (strlcpy(curpeer->conf.lliface, $2,
+			    sizeof(curpeer->conf.lliface)) >=
+			    sizeof(curpeer->conf.lliface)) {
+				yyerror("lliface \"%s\" too long: max %u",
+				    $2, sizeof(curpeer->conf.lliface) - 1);
+				free($2);
+				YYERROR;
+			}
+			free($2);
+	        }
 		| LOCALADDR address	{
 			memcpy(&curpeer->conf.local_addr, &$2,
 			    sizeof(curpeer->conf.local_addr));
@@ -2160,6 +2181,9 @@ lookup(char *s)
 		{ "include",		INCLUDE},
 		{ "inet",		IPV4},
 		{ "inet6",		IPV6},
+#if defined(IPV6_LINKLOCAL_PEER)
+		{ "interface",		LLIFACE},
+#endif
 		{ "ipsec",		IPSEC},
 		{ "key",		KEY},
 		{ "listen",		LISTEN},
@@ -2945,7 +2969,7 @@ parseextcommunity(struct filter_extcommunity *c, char *t, char *s)
 {
 	const struct ext_comm_pairs	 iana[] = IANA_EXT_COMMUNITIES;
 	const char 	*errstr;
-	u_int64_t	 ullval;
+	u_int64_t	 ullval = 0;
 	u_int32_t	 uval;
 	char		*p, *ep;
 	unsigned int	 i;
@@ -3064,6 +3088,9 @@ new_peer(void)
 		if (strlcpy(p->conf.descr, curgroup->conf.descr,
 		    sizeof(p->conf.descr)) >= sizeof(p->conf.descr))
 			fatalx("new_peer descr strlcpy");
+		if (strlcpy(p->conf.lliface, curgroup->conf.lliface,
+		    sizeof(p->conf.lliface)) >= sizeof(p->conf.lliface))
+			fatalx("new_peer lliface strlcpy");
 		p->conf.groupid = curgroup->conf.id;
 		p->conf.local_as = curgroup->conf.local_as;
 		p->conf.local_short_as = curgroup->conf.local_short_as;

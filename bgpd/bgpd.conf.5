@@ -763,6 +763,12 @@ Inherited from the global configuration if not given.
 Set the minimal acceptable holdtime.
 Inherited from the global configuration if not given.
 .Pp
+.It Ic interface Ar interface
+Set an interface used for a nexthop with a link-local IPv6 address.
+Note that if this is not specified and a link-local IPv6 address is
+received as nexthop of the peer, it will be marked as invalid and
+ignored.
+.Pp
 .It Xo
 .Ic ipsec
 .Pq Ic ah Ns | Ns Ic esp
@@ -813,11 +819,11 @@ is responsible for managing the session keys.
 With
 .Xr isakmpd 8 ,
 it is sufficient to copy the peer's public key, found in
-.Pa /etc/isakmpd/local.pub ,
+.Pa %%PREFIX%%/etc/isakmpd/private/local.pub ,
 to the local machine.
 It must be stored in a file
 named after the peer's IP address and must be stored in
-.Pa /etc/isakmpd/pubkeys/ipv4/ .
+.Pa %%PREFIX%%/etc/isakmpd/pubkeys/ipv4/ .
 The local public key must be copied to the peer in the same way.
 As
 .Xr bgpd 8
@@ -1476,8 +1482,8 @@ For prefixes with equally long paths, the prefix with the larger weight
 is selected.
 .El
 .Sh FILES
-.Bl -tag -width "/etc/bgpd.conf" -compact
-.It Pa /etc/bgpd.conf
+.Bl -tag -width "%%PREFIX%%/etc/bgpd.conf" -compact
+.It Pa %%PREFIX%%/etc/bgpd.conf
 .Xr bgpd 8
 configuration file
 .El

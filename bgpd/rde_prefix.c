@@ -138,6 +138,8 @@ pt_fill(struct bgpd_addr *prefix, int prefixlen)
 	default:
 		fatalx("pt_fill: unknown af");
 	}
+	/* NOT REACHED */
+	return (NULL);
 }
 
 struct pt_entry *
@@ -178,7 +180,7 @@ struct pt_entry *
 pt_lookup(struct bgpd_addr *addr)
 {
 	struct pt_entry	*p;
-	int		 i;
+	int		 i = 0;
 
 	switch (addr->aid) {
 	case AID_INET:

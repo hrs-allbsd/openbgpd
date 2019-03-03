@@ -24,11 +24,13 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/un.h>
+#include <sys/queue.h>
 #include <net/if_types.h>
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
+#include <netinet/tcp_var.h>
 #include <arpa/inet.h>
 
 #include <err.h>
@@ -53,6 +55,10 @@
 #define PFD_SOCK_RCTL		4
 #define PFD_SOCK_PFKEY		5
 #define PFD_LISTENERS_START	6
+
+#if defined(__FreeBSD__) /* FreeBSD has no LINK_STATE_IS_UP macro. */
+#define LINK_STATE_IS_UP(_s)  ((_s) >= LINK_STATE_UP)
+#endif /* defined(__FreeBSD__) */ 
 
 void	session_sighdlr(int);
 int	setup_listeners(u_int *);
@@ -132,6 +138,22 @@ setup_listeners(u_int *la_cnt)
 	int			 opt;
 	struct listen_addr	*la;
 	u_int			 cnt = 0;
+#if defined(__FreeBSD__)
+	int			 s;
+
+	/* Check if TCP_MD5SIG is supported. */
+	s = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (s < 0)
+		fatal("socket open for TCP_MD5SIG check");
+	opt = TF_SIGNATURE;
+	if (setsockopt(s, IPPROTO_TCP, TCP_MD5SIG, &opt, sizeof(opt)) == -1) {
+		if (errno == ENOPROTOOPT || errno == EINVAL)
+			sysdep.no_md5sig = 1;
+		else
+			fatal("setsockopt TCP_MD5SIG");
+	}
+	close(s);
+#endif /* defined(__FreeBSD__) */
 
 	TAILQ_FOREACH(la, conf->listen_addrs, entry) {
 		la->reconf = RECONF_NONE;
@@ -147,6 +169,7 @@ setup_listeners(u_int *la_cnt)
 		}
 
 		opt = 1;
+#if !defined(__FreeBSD__)
 		if (setsockopt(la->fd, IPPROTO_TCP, TCP_MD5SIG,
 		    &opt, sizeof(opt)) == -1) {
 			if (errno == ENOPROTOOPT) {	/* system w/o md5sig */
@@ -155,6 +178,7 @@ setup_listeners(u_int *la_cnt)
 			} else
 				fatal("setsockopt TCP_MD5SIG");
 		}
+#endif /* !defined(__FreeBSD__) */
 
 		/* set ttl to 255 so that ttl-security works */
 		if (la->sa.ss_family == AF_INET && setsockopt(la->fd,
@@ -388,8 +412,11 @@ session_main(int pipe_m2s[2], int pipe_s2r[2], int pipe_m2r[2],
 			pfd[PFD_SOCK_RCTL].fd = -1;
 		}
 		pfd[PFD_SOCK_PFKEY].fd = pfkeysock;
+#if !defined(__FreeBSD__)
 		pfd[PFD_SOCK_PFKEY].events = POLLIN;
-
+#else
+		pfd[PFD_SOCK_PFKEY].events = 0;
+#endif
 		i = PFD_LISTENERS_START;
 		TAILQ_FOREACH(la, conf->listen_addrs, entry) {
 			if (pauseaccept == 0) {

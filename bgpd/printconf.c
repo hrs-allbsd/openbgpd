@@ -20,6 +20,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__FreeBSD__)	/* limits.h */
+#include <limits.h>
+#endif
 
 #include "bgpd.h"
 #include "mrt.h"
@@ -117,10 +120,10 @@ print_extcommunity(struct filter_extcommunity *c)
 		break;
 	case EXT_COMMUNITY_OPAQUE:
 		printf("%s 0x%llx ", log_ext_subtype(c->subtype),
-		    c->data.ext_opaq);
+		    (long long unsigned int)c->data.ext_opaq);
 		break;
 	default:
-		printf("0x%x 0x%llx ", c->type, c->data.ext_opaq);
+		printf("0x%x 0x%llx ", c->type, (long long unsigned int)c->data.ext_opaq);
 		break;
 	}
 }
@@ -410,6 +413,10 @@ print_peer(struct peer_config *p, struct bgpd_config *conf, const char *c)
 		printf("%s\tdepend on \"%s\"\n", c, p->if_depend);
 	if (p->flags & PEERFLAG_TRANS_AS)
 		printf("%s\ttransparent-as yes\n", c);
+#if defined(IPV6_LINKLOCAL_PEER)
+	if (p->lliface[0])
+		printf("%s\tinterface %s\n", c, p->lliface);
+#endif
 
 	if (p->auth.method == AUTH_MD5SIG)
 		printf("%s\ttcp md5sig\n", c);
@@ -646,7 +653,8 @@ print_mrt(u_int32_t pid, u_int32_t gid, const char *prep, const char *prep2)
 			if (MRT2MC(m)->ReopenTimerInterval == 0)
 				printf("\n");
 			else
-				printf(" %d\n", MRT2MC(m)->ReopenTimerInterval);
+				printf(" %ld\n",
+				    MRT2MC(m)->ReopenTimerInterval);
 		}
 }
 

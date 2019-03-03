@@ -230,7 +230,7 @@ prefix_cmp(struct prefix *p1, struct prefix *p2)
 	}
 
 	fatalx("Uh, oh a politician in the decision process");
-	/* NOTREACHED */
+	return(0);	/* NOTREACHED */
 }
 
 /*

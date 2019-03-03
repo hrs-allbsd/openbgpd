@@ -54,7 +54,7 @@ int		 rde_attr_parse(u_char *, u_int16_t, struct rde_peer *,
 int		 rde_attr_add(struct rde_aspath *, u_char *, u_int16_t);
 u_int8_t	 rde_attr_missing(struct rde_aspath *, int, u_int16_t);
 int		 rde_get_mp_nexthop(u_char *, u_int16_t, u_int8_t,
-		     struct rde_aspath *);
+		     struct rde_aspath *, struct rde_peer *);
 int		 rde_update_extract_prefix(u_char *, u_int16_t, void *,
 		     u_int8_t, u_int8_t);
 int		 rde_update_get_prefix(u_char *, u_int16_t, struct bgpd_addr *,
@@ -1257,7 +1257,7 @@ rde_update_dispatch(struct imsg *imsg)
 			(void)nexthop_delete(asp->nexthop);
 			asp->nexthop = NULL;
 		}
-		if ((pos = rde_get_mp_nexthop(mpp, mplen, aid, asp)) == -1) {
+		if ((pos = rde_get_mp_nexthop(mpp, mplen, aid, asp, peer)) == -1) {
 			log_peer_warnx(&peer->conf, "bad nlri prefix");
 			rde_update_err(peer, ERR_UPDATE, ERR_UPD_OPTATTR,
 			    mpa.reach, mpa.reach_len);
@@ -1836,7 +1836,7 @@ rde_attr_missing(struct rde_aspath *a, int ebgp, u_int16_t nlrilen)
 
 int
 rde_get_mp_nexthop(u_char *data, u_int16_t len, u_int8_t aid,
-    struct rde_aspath *asp)
+    struct rde_aspath *asp, struct rde_peer *peer)
 {
 	struct bgpd_addr	nexthop;
 	u_int8_t		totlen, nhlen;
@@ -1868,6 +1868,19 @@ rde_get_mp_nexthop(u_char *data, u_int16_t len, u_int8_t aid,
 			return (-1);
 		}
 		memcpy(&nexthop.v6.s6_addr, data, 16);
+#if defined(__KAME__) && defined(IPV6_LINKLOCAL_PEER)
+		if (IN6_IS_ADDR_LINKLOCAL(&nexthop.v6) &&
+		    peer->conf.lliface[0]) {
+			int ifindex;
+
+			ifindex = if_nametoindex(peer->conf.lliface);
+			if (ifindex != 0) {
+				SET_IN6_LINKLOCAL_IFINDEX(nexthop.v6, ifindex);
+				nexthop.scope_id = ifindex;
+			} else
+				log_warnx("bad interface: %s", peer->conf.lliface);
+		}
+#endif
 		break;
 	case AID_VPN_IPv4:
 		/*
@@ -2393,7 +2406,7 @@ rde_dump_ctx_new(struct ctl_show_rib_request *req, pid_t pid,
 	struct rib_entry	*re;
 	u_int			 error;
 	u_int16_t		 id;
-	u_int8_t		 hostplen;
+	u_int8_t		 hostplen = 0;
 
 	if ((ctx = calloc(1, sizeof(*ctx))) == NULL) {
 		log_warn("rde_dump_ctx_new");
@@ -3250,7 +3263,7 @@ peer_up(u_int32_t id, struct session_up *sup)
 		return;
 
 	for (i = 0; i < AID_MAX; i++) {
-		if (peer->capa.mp[i])
+		if (peer->capa.mp[i] == 1)
 			peer_dump(id, i);
 	}
 }
@@ -3594,10 +3607,11 @@ sa_cmp(struct bgpd_addr *a, struct sockaddr *b)
 #ifdef __KAME__
 		/* directly stolen from sbin/ifconfig/ifconfig.c */
 		if (IN6_IS_ADDR_LINKLOCAL(&in6_b->sin6_addr)) {
-			in6_b->sin6_scope_id =
-			    ntohs(*(u_int16_t *)&in6_b->sin6_addr.s6_addr[2]);
-			in6_b->sin6_addr.s6_addr[2] =
-			    in6_b->sin6_addr.s6_addr[3] = 0;
+			if (in6_b->sin6_scope_id == 0) {
+				in6_b->sin6_scope_id =
+				    IN6_LINKLOCAL_IFINDEX(in6_b->sin6_addr);
+			}
+			SET_IN6_LINKLOCAL_IFINDEX(in6_b->sin6_addr, 0);
 		}
 #endif
 		if (bcmp(&a->v6, &in6_b->sin6_addr,

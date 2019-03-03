@@ -710,4 +710,5 @@ filterset_name(enum action_types type)
 	}
 
 	fatalx("filterset_name: got lost");
+	return (NULL); /* NOT REACHED */
 }

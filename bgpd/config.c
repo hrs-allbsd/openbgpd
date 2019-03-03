@@ -22,7 +22,9 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 
+#if !defined(__FreeBSD__) /* FreeBSD has no mpls support. */
 #include <netmpls/mpls.h>
+#endif
 
 #include <errno.h>
 #include <ifaddrs.h>
@@ -319,6 +321,7 @@ prepare_listeners(struct bgpd_config *conf)
 int
 get_mpe_label(struct rdomain *r)
 {
+#if !defined(__FreeBSD__) /* FreeBSD has no mpls support. */
 	struct  ifreq	ifr;
 	struct shim_hdr	shim;
 	int		s;
@@ -338,5 +341,6 @@ get_mpe_label(struct rdomain *r)
 	}
 	close(s);
 	r->label = shim.shim_label;
+#endif
 	return (0);
 }

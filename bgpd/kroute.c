@@ -27,7 +27,9 @@
 #include <net/if.h>
 #include <net/if_dl.h>
 #include <net/route.h>
+#if !defined(__FreeBSD__) /* FreeBSD has no mpls support. */
 #include <netmpls/mpls.h>
+#endif
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -194,7 +196,9 @@ int
 kr_init(void)
 {
 	int		opt = 0, rcvbuf, default_rcvbuf;
+#if !defined(__FreeBSD__) /* FreeBSD does not have ROUTE_TABLEFILTER. */
 	unsigned int	tid = RTABLE_ANY;
+#endif
 	socklen_t	optlen;
 
 	if ((kr_state.fd = socket(AF_ROUTE, SOCK_RAW, 0)) == -1) {
@@ -220,11 +224,13 @@ kr_init(void)
 		    rcvbuf /= 2)
 			;	/* nothing */
 
+#if !defined(__FreeBSD__) /* FreeBSD does not have ROUTE_TABLEFILTER. */
 	if (setsockopt(kr_state.fd, AF_ROUTE, ROUTE_TABLEFILTER, &tid,
 	    sizeof(tid)) == -1) {
 		log_warn("kr_init: setsockopt AF_ROUTE ROUTE_TABLEFILTER");
 		return (-1);
 	}
+#endif
 
 	kr_state.pid = getpid();
 	kr_state.rtseq = 1;
@@ -427,6 +433,7 @@ ktable_postload(void)
 int
 ktable_exists(u_int rtableid, u_int *rdomid)
 {
+#if !defined(__FreeBSD__) /* FreeBSD does not have NET_RT_TABLE. */
 	size_t			 len;
 	struct rt_tableinfo	 info;
 	int			 mib[6];
@@ -449,6 +456,9 @@ ktable_exists(u_int rtableid, u_int *rdomid)
 	}
 	if (rdomid)
 		*rdomid = info.rti_domainid;
+#else
+	*rdomid = 0;
+#endif
 	return (1);
 }
 
@@ -1633,17 +1643,29 @@ kroute6_find(struct ktable *kt, const struct in6_addr *prefix,
 struct kroute6_node *
 kroute6_matchgw(struct kroute6_node *kr, struct sockaddr_in6 *sa_in6)
 {
-	struct in6_addr	nexthop;
+	struct sockaddr_in6	nexthop;
 
 	if (sa_in6 == NULL) {
 		log_warnx("kroute6_matchgw: no nexthop defined");
 		return (NULL);
 	}
-	memcpy(&nexthop, &sa_in6->sin6_addr, sizeof(nexthop));
+	memcpy(&nexthop, sa_in6, sizeof(nexthop));
+#if defined(__KAME__) && defined(IPV6_LINKLOCAL_PEER)
+	if (IN6_IS_ADDR_LINKLOCAL(&nexthop.sin6_addr)) {
+		/* Embed scope id and set sin6_scope_id. */
+		if (nexthop.sin6_scope_id == 0)
+			nexthop.sin6_scope_id =
+			    IN6_LINKLOCAL_IFINDEX(nexthop.sin6_addr);
+		else
+			SET_IN6_LINKLOCAL_IFINDEX(nexthop.sin6_addr,
+			    nexthop.sin6_scope_id);
+	}
+#endif
 
 	while (kr) {
-		if (memcmp(&kr->r.nexthop, &nexthop, sizeof(nexthop)) == 0)
-			return (kr);
+		if (memcmp(&kr->r.nexthop, &nexthop.sin6_addr,
+		    sizeof(nexthop.sin6_addr)) == 0)
+				return (kr);
 		kr = kr->next;
 	}
 
@@ -2479,8 +2501,10 @@ send_rtmsg(int fd, int action, struct ktable *kt, struct kroute *kroute)
 		struct sockaddr_dl	dl;
 		char			pad[sizeof(long)];
 	}			ifp;
+#if !defined(__FreeBSD__) /* FreeBSD has no route labeling. */
 	struct sockaddr_mpls	mpls;
 	struct sockaddr_rtlabel	label;
+#endif /* !defined(__FreeBSD__) */
 	int			iovcnt = 0;
 
 	if (!kt->fib_sync)
@@ -2490,8 +2514,14 @@ send_rtmsg(int fd, int action, struct ktable *kt, struct kroute *kroute)
 	bzero(&hdr, sizeof(hdr));
 	hdr.rtm_version = RTM_VERSION;
 	hdr.rtm_type = action;
+#if !defined(__FreeBSD__) /* XXX: FreeBSD has no multiple routing tables */
 	hdr.rtm_tableid = kt->rtableid;
+#endif /* !defined(__FreeBSD__) */
+#if !defined(__FreeBSD__) /* XXX: FreeBSD has no rtm_priority */
 	hdr.rtm_priority = RTP_BGP;
+#else
+	hdr.rtm_flags = RTF_PROTO1;
+#endif /* !defined(__FreeBSD__) */
 	if (kroute->flags & F_BLACKHOLE)
 		hdr.rtm_flags |= RTF_BLACKHOLE;
 	if (kroute->flags & F_REJECT)
@@ -2553,6 +2583,7 @@ send_rtmsg(int fd, int action, struct ktable *kt, struct kroute *kroute)
 		iov[iovcnt++].iov_len = ROUNDUP(sizeof(struct sockaddr_dl));
 	}
 
+#if !defined(__FreeBSD__) /* FreeBSD has no mpls support. */
 	if (kroute->flags & F_MPLS) {
 		bzero(&mpls, sizeof(mpls));
 		mpls.smpls_len = sizeof(mpls);
@@ -2567,7 +2598,9 @@ send_rtmsg(int fd, int action, struct ktable *kt, struct kroute *kroute)
 		iov[iovcnt].iov_base = &mpls;
 		iov[iovcnt++].iov_len = sizeof(mpls);
 	}
+#endif
 
+#if !defined(__FreeBSD__) /* FreeBSD has no route labeling. */
 	if (kroute->labelid) {
 		bzero(&label, sizeof(label));
 		label.sr_len = sizeof(label);
@@ -2580,6 +2613,7 @@ send_rtmsg(int fd, int action, struct ktable *kt, struct kroute *kroute)
 		iov[iovcnt].iov_base = &label;
 		iov[iovcnt++].iov_len = sizeof(label);
 	}
+#endif /* !defined(__FreeBSD__) */
 
 retry:
 	if (writev(fd, iov, iovcnt) == -1) {
@@ -2611,7 +2645,9 @@ send_rt6msg(int fd, int action, struct ktable *kt, struct kroute6 *kroute)
 		struct sockaddr_in6	addr;
 		char			pad[sizeof(long)];
 	} prefix, nexthop, mask;
+#if !defined(__FreeBSD__) /* FreeBSD has no route labeling. */
 	struct sockaddr_rtlabel	label;
+#endif /* !defined(__FreeBSD__) */
 	int			iovcnt = 0;
 
 	if (!kt->fib_sync)
@@ -2621,7 +2657,11 @@ send_rt6msg(int fd, int action, struct ktable *kt, struct kroute6 *kroute)
 	bzero(&hdr, sizeof(hdr));
 	hdr.rtm_version = RTM_VERSION;
 	hdr.rtm_type = action;
-	hdr.rtm_tableid = kt->rtableid;
+#if !defined(__FreeBSD__) /* XXX: FreeBSD has no multiple routing tables */ 
+	hdr.rtm_tableid = kr_state.rtableid;
+#else
+	hdr.rtm_flags = RTF_PROTO1;
+#endif /* !defined(__FreeBSD__) */
 	if (kroute->flags & F_BLACKHOLE)
 		hdr.rtm_flags |= RTF_BLACKHOLE;
 	if (kroute->flags & F_REJECT)
@@ -2674,6 +2714,7 @@ send_rt6msg(int fd, int action, struct ktable *kt, struct kroute6 *kroute)
 	iov[iovcnt].iov_base = &mask;
 	iov[iovcnt++].iov_len = ROUNDUP(sizeof(struct sockaddr_in6));
 
+#if !defined(__FreeBSD__) /* FreeBSD has no route labeling. */
 	if (kroute->labelid) {
 		bzero(&label, sizeof(label));
 		label.sr_len = sizeof(label);
@@ -2686,6 +2727,7 @@ send_rt6msg(int fd, int action, struct ktable *kt, struct kroute6 *kroute)
 		iov[iovcnt].iov_base = &label;
 		iov[iovcnt++].iov_len = sizeof(label);
 	}
+#endif /* !defined(__FreeBSD__) */
 
 retry:
 	if (writev(fd, iov, iovcnt) == -1) {
@@ -2712,7 +2754,11 @@ int
 fetchtable(struct ktable *kt)
 {
 	size_t			 len;
+#if !defined(__FreeBSD__) /* FreeBSD has no table id. */
 	int			 mib[7];
+#else
+	int			mib[6];
+#endif
 	char			*buf = NULL, *next, *lim;
 	struct rt_msghdr	*rtm;
 	struct sockaddr		*sa, *gw, *rti_info[RTAX_MAX];
@@ -2727,9 +2773,15 @@ fetchtable(struct ktable *kt)
 	mib[3] = 0;
 	mib[4] = NET_RT_DUMP;
 	mib[5] = 0;
+#if !defined(__FreeBSD__) /* FreeBSD has no table id. */
 	mib[6] = kt->rtableid;
+#endif
 
+#if !defined(__FreeBSD__) /* FreeBSD has no table id. */
 	if (sysctl(mib, 7, NULL, &len, NULL, 0) == -1) {
+#else
+	if (sysctl(mib, 6, NULL, &len, NULL, 0) == -1) {
+#endif
 		if (kt->rtableid != 0 && errno == EINVAL)
 			/* table nonexistent */
 			return (0);
@@ -2741,7 +2793,11 @@ fetchtable(struct ktable *kt)
 			log_warn("fetchtable");
 			return (-1);
 		}
+#if !defined(__FreeBSD__) /* FreeBSD has no table id. */
 		if (sysctl(mib, 7, buf, &len, NULL, 0) == -1) {
+#else
+		if (sysctl(mib, 6, buf, &len, NULL, 0) == -1) {
+#endif
 			log_warn("sysctl2");
 			free(buf);
 			return (-1);
@@ -2753,7 +2809,11 @@ fetchtable(struct ktable *kt)
 		rtm = (struct rt_msghdr *)next;
 		if (rtm->rtm_version != RTM_VERSION)
 			continue;
+#if !defined(__FreeBSD__)
 		sa = (struct sockaddr *)(next + rtm->rtm_hdrlen);
+#else
+		sa = (struct sockaddr *)(next + sizeof(struct rt_msghdr));
+#endif
 		get_rtaddrs(rtm->rtm_addrs, sa, rti_info);
 
 		if ((sa = rti_info[RTAX_DST]) == NULL)
@@ -2772,7 +2832,11 @@ fetchtable(struct ktable *kt)
 			}
 
 			kr->r.flags = F_KERNEL;
+#if defined(__FreeBSD__)	/* no rtm_priority on FreeBSD */
+			kr->r.priority = RTP_BGP;
+#else
 			kr->r.priority = rtm->rtm_priority;
+#endif
 			kr->r.ifindex = rtm->rtm_index;
 			kr->r.prefix.s_addr =
 			    ((struct sockaddr_in *)sa)->sin_addr.s_addr;
@@ -2790,8 +2854,12 @@ fetchtable(struct ktable *kt)
 					break;
 				kr->r.prefixlen =
 				    mask2prefixlen(sa_in->sin_addr.s_addr);
-			} else if (rtm->rtm_flags & RTF_HOST)
+			} else if (rtm->rtm_flags & RTF_HOST) {
 				kr->r.prefixlen = 32;
+#if defined(__FreeBSD__)	/* RTF_HOST means connected route */
+				kr->r.flags |= F_CONNECTED;
+#endif
+			}
 			else
 				kr->r.prefixlen =
 				    prefixlen_classful(kr->r.prefix.s_addr);
@@ -2805,11 +2873,25 @@ fetchtable(struct ktable *kt)
 			}
 
 			kr6->r.flags = F_KERNEL;
+#if defined(__FreeBSD__)	/* no rtm_priority on FreeBSD */
+			kr6->r.priority = RTP_BGP;
+#else
 			kr6->r.priority = rtm->rtm_priority;
+#endif
 			kr6->r.ifindex = rtm->rtm_index;
 			memcpy(&kr6->r.prefix,
 			    &((struct sockaddr_in6 *)sa)->sin6_addr,
 			    sizeof(kr6->r.prefix));
+#if defined(__KAME__) && defined(IPV6_LINKLOCAL_PEER)
+			if (IN6_IS_ADDR_LINKLOCAL(&kr6->r.prefix)) {
+				if (((struct sockaddr_in6 *)sa)->sin6_scope_id !=0)
+					SET_IN6_LINKLOCAL_IFINDEX(kr6->r.prefix,
+					    ((struct sockaddr_in6 *)sa)->sin6_scope_id);
+				else
+					SET_IN6_LINKLOCAL_IFINDEX(kr6->r.prefix,
+					    rtm->rtm_index);
+			}
+#endif
 
 			sa_in6 = (struct sockaddr_in6 *)rti_info[RTAX_NETMASK];
 			if (rtm->rtm_flags & RTF_STATIC)
@@ -2824,8 +2906,12 @@ fetchtable(struct ktable *kt)
 				if (sa_in6->sin6_len == 0)
 					break;
 				kr6->r.prefixlen = mask2prefixlen6(sa_in6);
-			} else if (rtm->rtm_flags & RTF_HOST)
+			} else if (rtm->rtm_flags & RTF_HOST) {
 				kr6->r.prefixlen = 128;
+#if defined(__FreeBSD__)	/* RTF_HOST means connected route */
+				kr6->r.flags |= F_CONNECTED;
+#endif
+			}
 			else
 				fatalx("INET6 route without netmask");
 			break;
@@ -2847,6 +2933,13 @@ fetchtable(struct ktable *kt)
 				memcpy(&kr6->r.nexthop,
 				    &((struct sockaddr_in6 *)gw)->sin6_addr,
 				    sizeof(kr6->r.nexthop));
+#if defined(__KAME__) && defined(IPV6_LINKLOCAL_PEER)
+				if (IN6_IS_ADDR_LINKLOCAL(&kr6->r.nexthop) &&
+				    ((struct sockaddr_in6 *)gw)->sin6_scope_id != 0) {
+					SET_IN6_LINKLOCAL_IFINDEX(kr6->r.nexthop,
+					    ((struct sockaddr_in6 *)gw)->sin6_scope_id);
+				}
+#endif
 				break;
 			case AF_LINK:
 				if (sa->sa_family == AF_INET)
@@ -2857,13 +2950,23 @@ fetchtable(struct ktable *kt)
 			}
 
 		if (sa->sa_family == AF_INET) {
+#if !defined(__FreeBSD__)	/* no rtm_priority on FreeBSD */
 			if (rtm->rtm_priority == RTP_BGP)  {
+#else
+			/* never delete route */
+			if (0) {
+#endif
 				send_rtmsg(kr_state.fd, RTM_DELETE, kt, &kr->r);
 				free(kr);
 			} else
 				kroute_insert(kt, kr);
 		} else if (sa->sa_family == AF_INET6) {
+#if !defined(__FreeBSD__)	/* no rtm_priority on FreeBSD */
 			if (rtm->rtm_priority == RTP_BGP)  {
+#else
+			/* never delete route */
+			if (0) {
+#endif
 				send_rt6msg(kr_state.fd, RTM_DELETE, kt,
 				    &kr6->r);
 				free(kr6);
@@ -2980,7 +3083,11 @@ dispatch_rtmsg(void)
 		case RTM_ADD:
 		case RTM_CHANGE:
 		case RTM_DELETE:
+#if !defined(__FreeBSD__)
 			sa = (struct sockaddr *)(next + rtm->rtm_hdrlen);
+#else
+			sa = (struct sockaddr *)(next + sizeof(struct rt_msghdr));
+#endif
 			get_rtaddrs(rtm->rtm_addrs, sa, rti_info);
 
 			if (rtm->rtm_pid == kr_state.pid) /* cause by us */
@@ -2992,7 +3099,11 @@ dispatch_rtmsg(void)
 			if (rtm->rtm_flags & RTF_LLINFO) /* arp cache */
 				continue;
 
+#if !defined(__FreeBSD__) /* FreeBSD has no rtm_tableid. */
 			if ((kt = ktable_get(rtm->rtm_tableid)) == NULL)
+#else
+			if ((kt = ktable_get(0)) == NULL)
+#endif
 				continue;
 
 			if (dispatch_rtmsg_addr(rtm, rti_info, kt) == -1)
@@ -3050,7 +3161,11 @@ dispatch_rtmsg_addr(struct rt_msghdr *rtm, struct sockaddr *rti_info[RTAX_MAX],
 		mpath = 1;
 #endif
 
+#if !defined(__FreeBSD__)	/* no rtm_priority on FreeBSD */
 	prio = rtm->rtm_priority;
+#else
+	prio = RTP_BGP;
+#endif
 	switch (sa->sa_family) {
 	case AF_INET:
 		prefix.aid = AID_INET;
@@ -3060,8 +3175,12 @@ dispatch_rtmsg_addr(struct rt_msghdr *rtm, struct sockaddr *rti_info[RTAX_MAX],
 			if (sa_in->sin_len != 0)
 				prefixlen = mask2prefixlen(
 				    sa_in->sin_addr.s_addr);
-		} else if (rtm->rtm_flags & RTF_HOST)
+		} else if (rtm->rtm_flags & RTF_HOST) {
 			prefixlen = 32;
+#if defined(__FreeBSD__)	/* RTF_HOST means connected route */
+			flags |= F_CONNECTED;
+#endif
+		}
 		else
 			prefixlen =
 			    prefixlen_classful(prefix.v4.s_addr);
@@ -3070,12 +3189,26 @@ dispatch_rtmsg_addr(struct rt_msghdr *rtm, struct sockaddr *rti_info[RTAX_MAX],
 		prefix.aid = AID_INET6;
 		memcpy(&prefix.v6, &((struct sockaddr_in6 *)sa)->sin6_addr,
 		    sizeof(struct in6_addr));
+#if defined(__KAME__) && defined(IPV6_LINKLOCAL_PEER)
+		if (IN6_IS_ADDR_LINKLOCAL(&prefix.v6) != 0) {
+			if (((struct sockaddr_in6 *)sa)->sin6_scope_id !=0)
+				SET_IN6_LINKLOCAL_IFINDEX(prefix.v6,
+				    ((struct sockaddr_in6 *)sa)->sin6_scope_id);
+			else
+				SET_IN6_LINKLOCAL_IFINDEX(prefix.v6,
+				    rtm->rtm_index);
+		}
+#endif              
 		sa_in6 = (struct sockaddr_in6 *)rti_info[RTAX_NETMASK];
 		if (sa_in6 != NULL) {
 			if (sa_in6->sin6_len != 0)
 				prefixlen = mask2prefixlen6(sa_in6);
-		} else if (rtm->rtm_flags & RTF_HOST)
+		} else if (rtm->rtm_flags & RTF_HOST) {
 			prefixlen = 128;
+#if defined(__FreeBSD__)	/* RTF_HOST means connected route */
+			flags |= F_CONNECTED;
+#endif
+		}
 		else
 			fatalx("in6 net addr without netmask");
 		break;
@@ -3293,7 +3426,11 @@ add6:
 			kr6->r.flags = flags;
 			kr6->r.ifindex = ifindex;
 			kr6->r.priority = prio;
-
+#if defined(__KAME__) && defined(IPV6_LINKLOCAL_PEER)
+			if (IN6_IS_ADDR_LINKLOCAL(&kr6->r.nexthop))
+				SET_IN6_LINKLOCAL_IFINDEX(kr6->r.nexthop,
+				    ifindex);
+#endif
 			kroute6_insert(kt, kr6);
 		}
 		break;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.c,v 1.13 2010/11/18 12:18:31 claudio Exp $ */
+/*	$OpenBSD: util.c,v 1.11 2010/03/29 09:04:43 claudio Exp $ */
 
 /*
  * Copyright (c) 2006 Claudio Jeker <claudio@openbsd.org>
@@ -18,6 +18,9 @@
  */
 #include <sys/types.h>
 #include <sys/socket.h>
+#if defined(__FreeBSD__)	/* sys/limits.h */
+#include <sys/limits.h>
+#endif /* defined(__FreeBSD__) */
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>

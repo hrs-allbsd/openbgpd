@@ -31,11 +31,16 @@
 #include <poll.h>
 #include <stdarg.h>
 
-#include <imsg.h>
+#if defined(__FreeBSD__)	/* compat */
+#include "openbsd-compat.h"
+#endif /* defined(__FreeBSD__) */
+#include "imsg.h"
 
 #define	BGP_VERSION			4
 #define	BGP_PORT			179
+#ifndef CONFFILE
 #define	CONFFILE			"/etc/bgpd.conf"
+#endif /* !CONFFILE */
 #define	BGPD_USER			"_bgpd"
 #define	PEER_DESCR_LEN			32
 #define	PFTABLE_LEN			16
@@ -309,6 +314,7 @@ struct peer_config {
 	u_int8_t		 ttlsec;	/* TTL security hack */
 	u_int8_t		 flags;
 	u_int8_t		 pad[3];
+	char			 lliface[IFNAMSIZ];
 };
 
 #define PEERFLAG_TRANS_AS	0x01
@@ -876,6 +882,18 @@ struct rde_memstats {
 	int64_t		attr_data;
 	int64_t		attr_dcnt;
 };
+
+/* macros for IPv6 link-local address */
+#ifdef __KAME__
+#define IN6_LINKLOCAL_IFINDEX(addr) \
+        ((addr).s6_addr[2] << 8 | (addr).s6_addr[3])
+
+#define SET_IN6_LINKLOCAL_IFINDEX(addr, index) \
+        do { \
+                (addr).s6_addr[2] = ((index) >> 8) & 0xff; \
+                (addr).s6_addr[3] = (index) & 0xff; \
+        } while (0)
+#endif
 
 #define	MRT_FILE_LEN	512
 #define	MRT2MC(x)	((struct mrt_config *)(x))
