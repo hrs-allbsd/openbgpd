@@ -88,4 +88,7 @@ struct if_status_description {
 	{ 0, LINK_STATE_KALIVE_DOWN, "keepalive down" },		\
 	{ 0, 0, NULL }							\
 }
+
+#include <sys/timespec.h>
+void timespecsub(struct timespec *, struct timespec *, struct timespec *);
 #endif /* _OPENBSD_COMPAT_H */

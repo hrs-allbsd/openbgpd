@@ -1,4 +1,4 @@
-/*	$OpenBSD: irr_parser.c,v 1.9 2009/09/08 15:40:25 claudio Exp $ */
+/*	$OpenBSD: irr_parser.c,v 1.14 2015/04/25 21:44:26 phessler Exp $ */
 
 /*
  * Copyright (c) 2007 Henning Brauer <henning@openbsd.org>
@@ -17,13 +17,13 @@
  */
 
 #include <sys/types.h>
-#include <sys/param.h>
 #include <ctype.h>
 #include <err.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include "irrfilter.h"
 
@@ -231,20 +231,22 @@ parse_policy(char *key, char *val)
 	while ((tok = strsep(&val, " ")) != NULL) {
 		nextst = PO_NONE;
 		if (dir == IMPORT) {
-			if (!strcmp(tok, "from"))
+			if (!strcasecmp(tok, "from"))
 				nextst = PO_PEER_KEY;
-			else if (!strcmp(tok, "at"))
+			else if (!strcasecmp(tok, "at"))
 				nextst = PO_RTR_KEY;
-			else if (!strcmp(tok, "action"))
+			else if (!strcasecmp(tok, "action"))
 				nextst = PO_ACTION_KEY;
-			else if (!strcmp(tok, "accept"))
+			else if (!strcasecmp(tok, "accept"))
 				nextst = PO_FILTER_KEY;
 		} else if (dir == EXPORT) {
-			if (!strcmp(tok, "to"))
+			if (!strcasecmp(tok, "to"))
 				nextst = PO_PEER_KEY;
-			else if (!strcmp(tok, "at"))
+			else if (!strcasecmp(tok, "at"))
 				nextst = PO_RTR_KEY;
-			else if (!strcmp(tok, "announce"))
+			else if (!strcasecmp(tok, "action"))
+				nextst = PO_ACTION_KEY;
+			else if (!strcasecmp(tok, "announce"))
 				nextst = PO_FILTER_KEY;
 		}
 
@@ -279,7 +281,7 @@ parse_policy(char *key, char *val)
 					goto ppoerr;
 				if (strlen(tok) < 3 ||
 				    strncasecmp(tok, "AS", 2) ||
-				    !isdigit(tok[2]))
+				    !isdigit((unsigned char)tok[2]))
 					errx(1, "peering spec \"%s\": format "
 					    "error, AS expected", tok);
 				pi->peer_as = strtonum(tok + 2, 1, UINT_MAX,

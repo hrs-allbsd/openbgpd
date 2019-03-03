@@ -41,11 +41,12 @@ log_addr(const struct bgpd_addr *addr)
 
 	switch (addr->aid) {
 	case AID_INET:
-	case AID_INET6:
 		if (inet_ntop(aid2af(addr->aid), &addr->ba, buf,
 		    sizeof(buf)) == NULL)
 			return ("?");
 		return (buf);
+	case AID_INET6:
+		return (log_in6addr(&addr->v6));
 	case AID_VPN_IPv4:
 		if (inet_ntop(AF_INET, &addr->vpn4.addr, tbuf,
 		    sizeof(tbuf)) == NULL)

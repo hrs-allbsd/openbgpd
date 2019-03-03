@@ -3,3 +3,6 @@
 PREFIX?=	/usr/local
 BINDIR?=	${PREFIX}/sbin
 MANDIR?=	${PREFIX}/man/man
+.if defined(FREEBSDPORTS)
+WITH_INSTALL_AS_USER=	yes
+.endif

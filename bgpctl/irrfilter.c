@@ -1,4 +1,4 @@
-/*	$OpenBSD: irrfilter.c,v 1.3 2007/03/06 16:45:34 henning Exp $ */
+/*	$OpenBSD: irrfilter.c,v 1.6 2015/11/01 21:20:46 benno Exp $ */
 
 /*
  * Copyright (c) 2007 Henning Brauer <henning@openbsd.org>
@@ -15,12 +15,12 @@
  * AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
  * OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
+
 #if defined(__FreeBSD__)	/* compat */
 #include "openbsd-compat.h"
 #endif /* defined(__FreeBSD__) */
 
 #include <sys/types.h>
-#include <sys/param.h>
 #include <err.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +34,11 @@ irr_main(u_int32_t AS, int flags, char *outdir)
 {
 	char	*query;
 	int	 r;
+
+#if defined(__OpenBSD__)
+	if (pledge("stdio rpath wpath cpath inet dns", NULL) == -1)
+		err(1, "pledge");
+#endif
 
 	fprintf(stderr, "irrfilter for: %u, writing to %s\n", AS, outdir);
 
