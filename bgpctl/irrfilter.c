@@ -1,4 +1,4 @@
-/*	$OpenBSD: irrfilter.c,v 1.3 2007/03/06 16:45:34 henning Exp $ */
+/*	$OpenBSD: irrfilter.c,v 1.6 2015/11/01 21:20:46 benno Exp $ */
 
 /*
  * Copyright (c) 2007 Henning Brauer <henning@openbsd.org>
@@ -17,7 +17,6 @@
  */
 
 #include <sys/types.h>
-#include <sys/param.h>
 #include <err.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +30,9 @@ irr_main(u_int32_t AS, int flags, char *outdir)
 {
 	char	*query;
 	int	 r;
+
+	if (pledge("stdio rpath wpath cpath inet dns", NULL) == -1)
+		err(1, "pledge");
 
 	fprintf(stderr, "irrfilter for: %u, writing to %s\n", AS, outdir);
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: irr_output.c,v 1.12 2007/03/05 15:02:05 henning Exp $ */
+/*	$OpenBSD: irr_output.c,v 1.21 2018/09/17 13:35:36 claudio Exp $ */
 
 /*
  * Copyright (c) 2007 Henning Brauer <henning@openbsd.org>
@@ -17,9 +17,7 @@
  */
 
 #include <sys/types.h>
-#include <sys/param.h>
 #include <sys/stat.h>
-#include <sys/socket.h>
 #include <err.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +29,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#include "bgpd.h"
 #include "irrfilter.h"
 
 int	 process_policies(FILE *, struct policy_head *);
@@ -40,7 +39,7 @@ char	*action_torule(char *);
 void	 print_rule(FILE *, struct policy_item *, char *, struct irr_prefix *);
 
 #define allowed_in_address(x) \
-	(isalnum(x) || x == '.' || x == ':' || x == '-')
+	(isalnum((unsigned char)x) || x == '.' || x == ':' || x == '-')
 
 int
 write_filters(char *outpath)
@@ -97,6 +96,7 @@ process_policies(FILE *fh, struct policy_head *head)
 
 		policy_prettyprint(fh, pi);
 		policy_torule(fh, pi);
+		fflush(fh);
 
 		free(pi->peer_addr);
 		free(pi->action);
@@ -126,7 +126,7 @@ policy_prettyprint(FILE *fh, struct policy_item *pi)
 void
 policy_torule(FILE *fh, struct policy_item *pi)
 {
-	struct as_set		*ass;
+	struct irr_as_set	*ass;
 	struct prefix_set	*pfxs;
 	char			*srcas;
 	u_int			 i, j;
@@ -159,7 +159,7 @@ action_torule(char *s)
 	char		 ebuf[2048];
 
 	if ((tmp = strdup(s)) == NULL)
-		err(1, "foo");
+		err(1, NULL);
 	abuf[0] = '\0';
 	while ((val = strsep(&tmp, ";")) != NULL && *val) {
 		key = strsep(&val, "=");
@@ -196,8 +196,7 @@ void
 print_rule(FILE *fh, struct policy_item *pi, char *sourceas,
     struct irr_prefix *prefix)
 {
-	char	*fmt = "allow quick %s %s%s%s%s%s\n";
-	char	*peer = "any";
+	char	 peer[PEER_DESCR_LEN];
 	char	*action = "";
 	char	*dir;
 	char	*srcas[2] = { "", "" };
@@ -210,7 +209,9 @@ print_rule(FILE *fh, struct policy_item *pi, char *sourceas,
 		dir = "to";
 
 	if (pi->peer_addr)
-		peer = pi->peer_addr;
+		snprintf(peer, PEER_DESCR_LEN, "%s", pi->peer_addr);
+	else
+		snprintf(peer, PEER_DESCR_LEN, "AS %s", log_as(pi->peer_as));
 
 	if (pi->action)
 		action = action_torule(pi->action);
@@ -240,5 +241,6 @@ print_rule(FILE *fh, struct policy_item *pi, char *sourceas,
 		}
 	}
 
-	fprintf(fh, fmt, dir, peer, srcas[0], srcas[1], pbuf, action);
+	fprintf(fh, "allow quick %s %s%s%s%s%s\n", dir, peer,
+	    srcas[0], srcas[1], pbuf, action);
 }

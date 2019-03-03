@@ -1,4 +1,4 @@
-/*	$OpenBSD: pftable.c,v 1.5 2005/07/01 09:19:24 claudio Exp $ */
+/*	$OpenBSD: pftable.c,v 1.12 2018/11/25 15:31:12 deraadt Exp $ */
 
 /*
  * Copyright (c) 2004 Damien Miller <djm@openbsd.org>
@@ -20,6 +20,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 
+#include <netinet/in.h>
 #include <net/if.h>
 #include <net/pfvar.h>
 
@@ -27,6 +28,8 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+
+#include "log.h"
 
 /* Namespace collision: these are defined in both bgpd.h and pfvar.h */
 #undef v4
@@ -134,12 +137,11 @@ pftable_add(const char *name)
 		if (strcmp(pft->name, name) == 0)
 			return (0);
 
-	if ((pft = malloc(sizeof(*pft))) == NULL) {
+	if ((pft = calloc(1, sizeof(*pft))) == NULL) {
 		log_warn("pftable malloc");
 		return (-1);
 	}
 
-	bzero(pft, sizeof(*pft));
 	if (strlcpy(pft->name, name, sizeof(pft->name)) >= sizeof(pft->name)) {
 		log_warn("pf_table name too long");
 		free(pft);
@@ -159,10 +161,8 @@ pftable_clear_all(void)
 	LIST_FOREACH(pft, &tables, entry) {
 		if (pftable_clear(pft->name) != 0)
 			return (-1);
-		if (pft->worklist != NULL) {
-			free(pft->worklist);
-			pft->worklist = NULL;
-		}
+		free(pft->worklist);
+		pft->worklist = NULL;
 		pft->nalloc = pft->naddrs = 0;
 		pft->what = 0;
 	}
@@ -198,7 +198,7 @@ pftable_add_work(const char *table, struct bgpd_addr *addr,
 
 	if (pft->nalloc <= pft->naddrs)
 		pft->nalloc = pft->nalloc == 0 ? 1 : pft->nalloc * 2;
-	tmp = realloc(pft->worklist, sizeof(*tmp) * pft->nalloc);
+	tmp = reallocarray(pft->worklist, pft->nalloc, sizeof(*tmp));
 	if (tmp == NULL) {
 		if (pft->worklist != NULL) {
 			log_warn("pftable_add_work: malloc");
@@ -249,8 +249,7 @@ pftable_commit(void)
 	LIST_FOREACH(pft, &tables, entry) {
 		if (pft->what != 0 && pftable_change(pft) != 0)
 			ret = -1;
-		if (pft->worklist != NULL)
-			free(pft->worklist);
+		free(pft->worklist);
 		pft->worklist = NULL;
 		pft->nalloc = pft->naddrs = 0;
 		pft->what = 0;
@@ -258,4 +257,3 @@ pftable_commit(void)
 
 	return (ret);
 }
-

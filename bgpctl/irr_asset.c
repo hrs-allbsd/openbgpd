@@ -1,4 +1,4 @@
-/*	$OpenBSD: irr_asset.c,v 1.7 2007/03/31 12:46:55 henning Exp $ */
+/*	$OpenBSD: irr_asset.c,v 1.12 2018/09/17 13:35:36 claudio Exp $ */
 
 /*
  * Copyright (c) 2007 Henning Brauer <henning@openbsd.org>
@@ -17,7 +17,6 @@
  */
 
 #include <sys/types.h>
-#include <sys/param.h>
 #include <err.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,12 +26,12 @@
 
 #include "irrfilter.h"
 
-int		 as_set_compare(struct as_set *, struct as_set *);
-struct as_set	*as_set_find(char *);
+int		as_set_compare(struct irr_as_set *, struct irr_as_set *);
+struct irr_as_set *as_set_find(char *);
 
-RB_HEAD(as_set_h, as_set)	as_set_h;
-RB_PROTOTYPE(as_set_h, as_set, entry, as_set_compare)
-RB_GENERATE(as_set_h, as_set, entry, as_set_compare)
+RB_HEAD(as_set_h, irr_as_set)	as_set_h;
+RB_PROTOTYPE(as_set_h, irr_as_set, entry, as_set_compare)
+RB_GENERATE(as_set_h, irr_as_set, entry, as_set_compare)
 
 enum obj_type {
 	T_UNKNOWN,
@@ -40,26 +39,26 @@ enum obj_type {
 	T_AUTNUM
 };
 
-struct as_set	*curass;
+struct irr_as_set	*curass;
 
-struct as_set	*asset_get(char *);
+struct irr_as_set *asset_get(char *);
 enum obj_type	 asset_membertype(char *);
-void		 asset_resolve(struct as_set *);
-int		 asset_merge(struct as_set *, struct as_set *);
-int		 asset_add_as(struct as_set *, char *);
-int		 asset_add_asset(struct as_set *, char *);
+void		 asset_resolve(struct irr_as_set *);
+int		 asset_merge(struct irr_as_set *, struct irr_as_set *);
+int		 asset_add_as(struct irr_as_set *, char *);
+int		 asset_add_asset(struct irr_as_set *, char *);
 
-struct as_set *
+struct irr_as_set *
 asset_expand(char *s)
 {
-	struct as_set	*ass;
-	char		*name;
-	size_t		 i;
+	struct irr_as_set	*ass;
+	char			*name;
+	size_t			 i;
 
 	if ((name = calloc(1, strlen(s) + 1)) == NULL)
 		err(1, "asset_expand calloc");
 	for (i = 0; i < strlen(s); i++)
-		name[i] = toupper(s[i]);
+		name[i] = toupper((unsigned char)s[i]);
 
 	ass = asset_get(name);
 	asset_resolve(ass);
@@ -68,11 +67,11 @@ asset_expand(char *s)
 	return (ass);
 }
 
-struct as_set *
+struct irr_as_set *
 asset_get(char *name)
 {
-	struct as_set	*ass, *mas;
-	u_int		 i;
+	struct irr_as_set	*ass, *mas;
+	u_int			 i;
 
 	/*
 	 * the caching prevents the endless recursion.
@@ -145,17 +144,18 @@ asset_membertype(char *name)
 	}
 
 	/* neither plain nor hierachical set definition, might be aut-num */
-	if (!strncmp(name, "AS", 2) && strlen(name) > 2 && isdigit(name[2]))
+	if (!strncmp(name, "AS", 2) && strlen(name) > 2 &&
+	    isdigit((unsigned char)name[2]))
 		return (T_AUTNUM);
 
 	return (T_UNKNOWN);
 }
 
 void
-asset_resolve(struct as_set *ass)
+asset_resolve(struct irr_as_set *ass)
 {
-	struct as_set	*mas;
-	u_int		 i;
+	struct irr_as_set	*mas;
+	u_int			 i;
 
 	/*
 	 * traverse all as_set members and fold their
@@ -186,7 +186,7 @@ asset_resolve(struct as_set *ass)
 }
 
 int
-asset_merge(struct as_set *ass, struct as_set *mas)
+asset_merge(struct irr_as_set *ass, struct irr_as_set *mas)
 {
 	u_int	i, j;
 
@@ -226,10 +226,10 @@ asset_addmember(char *s)
 	if ((as = calloc(1, strlen(s) + 1)) == NULL)
 		err(1, "asset_addmember strdup");
 	for (i = 0; i < strlen(s); i++)
-		as[i] = toupper(s[i]);
+		as[i] = toupper((unsigned char)s[i]);
 
-	if ((p = realloc(curass->members,
-	    (curass->n_members + 1) * sizeof(char *))) == NULL)
+	if ((p = reallocarray(curass->members,
+	    curass->n_members + 1, sizeof(char *))) == NULL)
 		err(1, "asset_addmember strdup");
 	curass->members = p;
 	curass->n_members++;
@@ -239,12 +239,12 @@ asset_addmember(char *s)
 }
 
 int
-asset_add_as(struct as_set *ass, char *s)
+asset_add_as(struct irr_as_set *ass, char *s)
 {
 	void *p;
 
-	if ((p = realloc(ass->as,
-	    (ass->n_as + 1) * sizeof(char *))) == NULL)
+	if ((p = reallocarray(ass->as,
+	    ass->n_as + 1, sizeof(char *))) == NULL)
 		err(1, "asset_add_as strdup");
 	ass->as = p;
 	ass->n_as++;
@@ -257,12 +257,12 @@ asset_add_as(struct as_set *ass, char *s)
 }
 
 int
-asset_add_asset(struct as_set *ass, char *s)
+asset_add_asset(struct irr_as_set *ass, char *s)
 {
 	void *p;
 
-	if ((p = realloc(ass->as_set,
-	    (ass->n_as_set + 1) * sizeof(char *))) == NULL)
+	if ((p = reallocarray(ass->as_set,
+	    ass->n_as_set + 1, sizeof(char *))) == NULL)
 		err(1, "asset_add_asset strdup");
 	ass->as_set = p;
 	ass->n_as_set++;
@@ -276,15 +276,15 @@ asset_add_asset(struct as_set *ass, char *s)
 
 /* RB helpers */
 int
-as_set_compare(struct as_set *a, struct as_set *b)
+as_set_compare(struct irr_as_set *a, struct irr_as_set *b)
 {
 	return (strcmp(a->name, b->name));
 }
 
-struct as_set *
+struct irr_as_set *
 as_set_find(char *name)
 {
-	struct as_set	s;
+	struct irr_as_set	s;
 
 	s.name = name;
 	return (RB_FIND(as_set_h, &as_set_h, &s));

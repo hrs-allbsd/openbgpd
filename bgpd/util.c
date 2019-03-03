@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.c,v 1.13 2010/11/18 12:18:31 claudio Exp $ */
+/*	$OpenBSD: util.c,v 1.48 2019/02/27 04:31:56 claudio Exp $ */
 
 /*
  * Copyright (c) 2006 Claudio Jeker <claudio@openbsd.org>
@@ -20,21 +20,24 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netdb.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <vis.h>
 
 #include "bgpd.h"
 #include "rde.h"
+#include "log.h"
 
 const char	*aspath_delim(u_int8_t, int);
 
 const char *
 log_addr(const struct bgpd_addr *addr)
 {
-	static char	buf[48];
-	char		tbuf[16];
+	static char	buf[74];
+	char		tbuf[40];
 
 	switch (addr->aid) {
 	case AID_INET:
@@ -50,6 +53,13 @@ log_addr(const struct bgpd_addr *addr)
 		snprintf(buf, sizeof(buf), "%s %s", log_rd(addr->vpn4.rd),
 		   tbuf);
 		return (buf);
+	case AID_VPN_IPv6:
+		if (inet_ntop(aid2af(addr->aid), &addr->vpn6.addr, tbuf,
+		    sizeof(tbuf)) == NULL)
+			return ("?");
+		snprintf(buf, sizeof(buf), "%s %s", log_rd(addr->vpn6.rd),
+		    tbuf);
+		return (buf);
 	}
 	return ("???");
 }
@@ -61,7 +71,6 @@ log_in6addr(const struct in6_addr *addr)
 	u_int16_t		tmp16;
 
 	bzero(&sa_in6, sizeof(sa_in6));
-	sa_in6.sin6_len = sizeof(sa_in6);
 	sa_in6.sin6_family = AF_INET6;
 	memcpy(&sa_in6.sin6_addr, addr, sizeof(sa_in6.sin6_addr));
 
@@ -74,15 +83,15 @@ log_in6addr(const struct in6_addr *addr)
 		sa_in6.sin6_addr.s6_addr[3] = 0;
 	}
 
-	return (log_sockaddr((struct sockaddr *)&sa_in6));
+	return (log_sockaddr((struct sockaddr *)&sa_in6, sizeof(sa_in6)));
 }
 
 const char *
-log_sockaddr(struct sockaddr *sa)
+log_sockaddr(struct sockaddr *sa, socklen_t len)
 {
 	static char	buf[NI_MAXHOST];
 
-	if (getnameinfo(sa, sa->sa_len, buf, sizeof(buf), NULL, 0,
+	if (getnameinfo(sa, len, buf, sizeof(buf), NULL, 0,
 	    NI_NUMERICHOST))
 		return ("(unknown)");
 	else
@@ -92,16 +101,11 @@ log_sockaddr(struct sockaddr *sa)
 const char *
 log_as(u_int32_t as)
 {
-	static char	buf[12];	/* "65000.65000\0" */
+	static char	buf[11];	/* "4294967294\0" */
 
-	if (as <= USHRT_MAX) {
-		if (snprintf(buf, sizeof(buf), "%u", as) == -1)
-			return ("?");
-	} else {
-		if (snprintf(buf, sizeof(buf), "%u.%u", as >> 16,
-		    as & 0xffff) == -1)
-			return ("?");
-	}
+	if (snprintf(buf, sizeof(buf), "%u", as) == -1)
+		return ("?");
+
 	return (buf);
 }
 
@@ -113,23 +117,23 @@ log_rd(u_int64_t rd)
 	u_int32_t	u32;
 	u_int16_t	u16;
 
-	rd = betoh64(rd);
+	rd = be64toh(rd);
 	switch (rd >> 48) {
-	case EXT_COMMUNITY_TWO_AS:
+	case EXT_COMMUNITY_TRANS_TWO_AS:
 		u32 = rd & 0xffffffff;
 		u16 = (rd >> 32) & 0xffff;
-		snprintf(buf, sizeof(buf), "rd %i:%i", u16, u32);
+		snprintf(buf, sizeof(buf), "rd %hu:%u", u16, u32);
 		break;
-	case EXT_COMMUNITY_FOUR_AS:
+	case EXT_COMMUNITY_TRANS_FOUR_AS:
 		u32 = (rd >> 16) & 0xffffffff;
 		u16 = rd & 0xffff;
-		snprintf(buf, sizeof(buf), "rd %s:%i", log_as(u32), u16);
+		snprintf(buf, sizeof(buf), "rd %s:%hu", log_as(u32), u16);
 		break;
-	case EXT_COMMUNITY_IPV4:
+	case EXT_COMMUNITY_TRANS_IPV4:
 		u32 = (rd >> 16) & 0xffffffff;
 		u16 = rd & 0xffff;
 		addr.s_addr = htonl(u32);
-		snprintf(buf, sizeof(buf), "rd %s:%i", inet_ntoa(addr), u16);
+		snprintf(buf, sizeof(buf), "rd %s:%hu", inet_ntoa(addr), u16);
 		break;
 	default:
 		return ("rd ?");
@@ -137,30 +141,31 @@ log_rd(u_int64_t rd)
 	return (buf);
 }
 
+const struct ext_comm_pairs iana_ext_comms[] = IANA_EXT_COMMUNITIES;
+
 /* NOTE: this function does not check if the type/subtype combo is
  * actually valid. */
 const char *
-log_ext_subtype(u_int8_t subtype)
+log_ext_subtype(short type, u_int8_t subtype)
 {
 	static char etype[6];
+	const struct ext_comm_pairs *cp;
 
-	switch (subtype) {
-	case EXT_COMMUNITY_ROUTE_TGT:
-		return ("rt");	/* route target */
-	case EXT_CUMMUNITY_ROUTE_ORIG:
-		return ("soo");	/* source of origin */
-	case EXT_COMMUNITY_OSPF_DOM_ID:
-		return ("odi");	/* ospf domain id */
-	case EXT_COMMUNITY_OSPF_RTR_TYPE:
-		return ("ort");	/* ospf route type */
-	case EXT_COMMUNITY_OSPF_RTR_ID:
-		return ("ori");	/* ospf router id */
-	case EXT_COMMUNITY_BGP_COLLECT:
-		return ("bdc");	/* bgp data collection */
-	default:
-		snprintf(etype, sizeof(etype), "[%u]", subtype);
-		return (etype);
+	for (cp = iana_ext_comms; cp->subname != NULL; cp++) {
+		if ((type == cp->type || type == -1) && subtype == cp->subtype)
+			return (cp->subname);
 	}
+	snprintf(etype, sizeof(etype), "[%u]", subtype);
+	return (etype);
+}
+
+const char *
+log_shutcomm(const char *communication) {
+	static char buf[(SHUT_COMM_LEN - 1) * 4 + 1];
+
+	strnvis(buf, communication, sizeof(buf), VIS_NL | VIS_OCTAL);
+
+	return buf;
 }
 
 const char *
@@ -295,32 +300,10 @@ aspath_strlen(void *data, u_int16_t len)
 
 		for (i = 0; i < seg_len; i++) {
 			as = aspath_extract(seg, i);
-			if (as > USHRT_MAX) {
-				u_int32_t	a = as >> 16;
 
-				if (a >= 10000)
-					total_size += 5;
-				else if (a >= 1000)
-					total_size += 4;
-				else if (a >= 100)
-					total_size += 3;
-				else if (a >= 10)
-					total_size += 2;
-				else
-					total_size += 1;
-				total_size += 1; /* dot between hi & lo */
-				as &= 0xffff;
-			}
-			if (as >= 10000)
-				total_size += 5;
-			else if (as >= 1000)
-				total_size += 4;
-			else if (as >= 100)
-				total_size += 3;
-			else if (as >= 10)
-				total_size += 2;
-			else
-				total_size += 1;
+			do {
+				total_size++;
+			} while ((as = as / 10) != 0);
 
 			if (i + 1 < seg_len)
 				total_size += 1;
@@ -330,67 +313,6 @@ aspath_strlen(void *data, u_int16_t len)
 			total_size += 2;
 	}
 	return (total_size);
-}
-
-/* we need to be able to search more than one as */
-int
-aspath_match(void *data, u_int16_t len, enum as_spec type, u_int32_t as)
-{
-	u_int8_t	*seg;
-	int		 final;
-	u_int16_t	 seg_size;
-	u_int8_t	 i, seg_type, seg_len;
-
-	if (type == AS_EMPTY) {
-		if (len == 0)
-			return (1);
-		else
-			return (0);
-	}
-
-	final = 0;
-	seg = data;
-	for (; len > 0; len -= seg_size, seg += seg_size) {
-		seg_type = seg[0];
-		seg_len = seg[1];
-		seg_size = 2 + sizeof(u_int32_t) * seg_len;
-
-		final = (len == seg_size);
-
-		/* just check the first (leftmost) AS */
-		if (type == AS_PEER) {
-			if (as == aspath_extract(seg, 0))
-				return (1);
-			else
-				return (0);
-		}
-		/* just check the final (rightmost) AS */
-		if (type == AS_SOURCE) {
-			/* not yet in the final segment */
-			if (!final)
-				continue;
-
-			if (as == aspath_extract(seg, seg_len - 1))
-				return (1);
-			else
-				return (0);
-		}
-
-		/* AS_TRANSIT or AS_ALL */
-		for (i = 0; i < seg_len; i++) {
-			if (as == aspath_extract(seg, i)) {
-				/*
-				 * the source (rightmost) AS is excluded from
-				 * AS_TRANSIT matches.
-				 */
-				if (final && i == seg_len - 1 &&
-				    type == AS_TRANSIT)
-					return (0);
-				return (1);
-			}
-		}
-	}
-	return (0);
 }
 
 /*
@@ -409,6 +331,325 @@ aspath_extract(const void *seg, int pos)
 	return (ntohl(as));
 }
 
+/*
+ * Verify that the aspath is correctly encoded.
+ */
+int
+aspath_verify(void *data, u_int16_t len, int as4byte)
+{
+	u_int8_t	*seg = data;
+	u_int16_t	 seg_size, as_size = 2;
+	u_int8_t	 seg_len, seg_type;
+	int		 error = 0;
+
+	if (len & 1)
+		/* odd length aspath are invalid */
+		return (AS_ERR_BAD);
+
+	if (as4byte)
+		as_size = 4;
+
+	for (; len > 0; len -= seg_size, seg += seg_size) {
+		const u_int8_t	*ptr;
+		int		 pos;
+
+		if (len < 2)	/* header length check */
+			return (AS_ERR_BAD);
+		seg_type = seg[0];
+		seg_len = seg[1];
+
+		if (seg_len == 0)
+			/* empty aspath segments are not allowed */
+			return (AS_ERR_BAD);
+
+		/*
+		 * BGP confederations should not show up but consider them
+		 * as a soft error which invalidates the path but keeps the
+		 * bgp session running.
+		 */
+		if (seg_type == AS_CONFED_SEQUENCE || seg_type == AS_CONFED_SET)
+			error = AS_ERR_SOFT;
+		if (seg_type != AS_SET && seg_type != AS_SEQUENCE &&
+		    seg_type != AS_CONFED_SEQUENCE && seg_type != AS_CONFED_SET)
+			return (AS_ERR_TYPE);
+
+		seg_size = 2 + as_size * seg_len;
+
+		if (seg_size > len)
+			return (AS_ERR_LEN);
+
+		/* RFC 7607 - AS 0 is considered malformed */
+		ptr = seg + 2;
+		for (pos = 0; pos < seg_len; pos++) {
+			u_int32_t as;
+
+			memcpy(&as, ptr, as_size);
+			if (as == 0)
+				error = AS_ERR_SOFT;
+			ptr += as_size;
+		}
+	}
+	return (error);	/* aspath is valid but probably not loop free */
+}
+
+/*
+ * convert a 2 byte aspath to a 4 byte one.
+ */
+u_char *
+aspath_inflate(void *data, u_int16_t len, u_int16_t *newlen)
+{
+	u_int8_t	*seg, *nseg, *ndata;
+	u_int16_t	 seg_size, olen, nlen;
+	u_int8_t	 seg_len;
+
+	/* first calculate the length of the aspath */
+	seg = data;
+	nlen = 0;
+	for (olen = len; olen > 0; olen -= seg_size, seg += seg_size) {
+		seg_len = seg[1];
+		seg_size = 2 + sizeof(u_int16_t) * seg_len;
+		nlen += 2 + sizeof(u_int32_t) * seg_len;
+
+		if (seg_size > olen) {
+			errno = ERANGE;
+			return (NULL);
+		}
+	}
+
+	*newlen = nlen;
+	if ((ndata = malloc(nlen)) == NULL)
+		return (NULL);
+
+	/* then copy the aspath */
+	seg = data;
+	for (nseg = ndata; nseg < ndata + nlen; ) {
+		*nseg++ = *seg++;
+		*nseg++ = seg_len = *seg++;
+		for (; seg_len > 0; seg_len--) {
+			*nseg++ = 0;
+			*nseg++ = 0;
+			*nseg++ = *seg++;
+			*nseg++ = *seg++;
+		}
+	}
+
+	return (ndata);
+}
+
+/* NLRI functions to extract prefixes from the NLRI blobs */
+static int
+extract_prefix(u_char *p, u_int16_t len, void *va,
+    u_int8_t pfxlen, u_int8_t max)
+{
+	static u_char addrmask[] = {
+	    0x00, 0x80, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, 0xff };
+	u_char		*a = va;
+	int		 i;
+	u_int16_t	 plen = 0;
+
+	for (i = 0; pfxlen && i < max; i++) {
+		if (len <= plen)
+			return (-1);
+		if (pfxlen < 8) {
+			a[i] = *p++ & addrmask[pfxlen];
+			plen++;
+			break;
+		} else {
+			a[i] = *p++;
+			plen++;
+			pfxlen -= 8;
+		}
+	}
+	return (plen);
+}
+
+int
+nlri_get_prefix(u_char *p, u_int16_t len, struct bgpd_addr *prefix,
+    u_int8_t *prefixlen)
+{
+	u_int8_t	 pfxlen;
+	int		 plen;
+
+	if (len < 1)
+		return (-1);
+
+	pfxlen = *p++;
+	len--;
+
+	bzero(prefix, sizeof(struct bgpd_addr));
+	prefix->aid = AID_INET;
+	*prefixlen = pfxlen;
+
+	if (pfxlen > 32)
+		return (-1);
+	if ((plen = extract_prefix(p, len, &prefix->v4, pfxlen,
+	    sizeof(prefix->v4))) == -1)
+		return (-1);
+
+	return (plen + 1);	/* pfxlen needs to be added */
+}
+
+int
+nlri_get_prefix6(u_char *p, u_int16_t len, struct bgpd_addr *prefix,
+    u_int8_t *prefixlen)
+{
+	int		plen;
+	u_int8_t	pfxlen;
+
+	if (len < 1)
+		return (-1);
+
+	pfxlen = *p++;
+	len--;
+
+	bzero(prefix, sizeof(struct bgpd_addr));
+	prefix->aid = AID_INET6;
+	*prefixlen = pfxlen;
+
+	if (pfxlen > 128)
+		return (-1);
+	if ((plen = extract_prefix(p, len, &prefix->v6, pfxlen,
+	    sizeof(prefix->v6))) == -1)
+		return (-1);
+
+	return (plen + 1);	/* pfxlen needs to be added */
+}
+
+int
+nlri_get_vpn4(u_char *p, u_int16_t len, struct bgpd_addr *prefix,
+    u_int8_t *prefixlen, int withdraw)
+{
+	int		 rv, done = 0;
+	u_int8_t	 pfxlen;
+	u_int16_t	 plen;
+
+	if (len < 1)
+		return (-1);
+
+	memcpy(&pfxlen, p, 1);
+	p += 1;
+	plen = 1;
+
+	bzero(prefix, sizeof(struct bgpd_addr));
+
+	/* label stack */
+	do {
+		if (len - plen < 3 || pfxlen < 3 * 8)
+			return (-1);
+		if (prefix->vpn4.labellen + 3U >
+		    sizeof(prefix->vpn4.labelstack))
+			return (-1);
+		if (withdraw) {
+			/* on withdraw ignore the labelstack all together */
+			plen += 3;
+			pfxlen -= 3 * 8;
+			break;
+		}
+		prefix->vpn4.labelstack[prefix->vpn4.labellen++] = *p++;
+		prefix->vpn4.labelstack[prefix->vpn4.labellen++] = *p++;
+		prefix->vpn4.labelstack[prefix->vpn4.labellen] = *p++;
+		if (prefix->vpn4.labelstack[prefix->vpn4.labellen] &
+		    BGP_MPLS_BOS)
+			done = 1;
+		prefix->vpn4.labellen++;
+		plen += 3;
+		pfxlen -= 3 * 8;
+	} while (!done);
+
+	/* RD */
+	if (len - plen < (int)sizeof(u_int64_t) ||
+	    pfxlen < sizeof(u_int64_t) * 8)
+		return (-1);
+	memcpy(&prefix->vpn4.rd, p, sizeof(u_int64_t));
+	pfxlen -= sizeof(u_int64_t) * 8;
+	p += sizeof(u_int64_t);
+	plen += sizeof(u_int64_t);
+
+	/* prefix */
+	prefix->aid = AID_VPN_IPv4;
+	*prefixlen = pfxlen;
+
+	if (pfxlen > 32)
+		return (-1);
+	if ((rv = extract_prefix(p, len, &prefix->vpn4.addr,
+	    pfxlen, sizeof(prefix->vpn4.addr))) == -1)
+		return (-1);
+
+	return (plen + rv);
+}
+
+int
+nlri_get_vpn6(u_char *p, u_int16_t len, struct bgpd_addr *prefix,
+    u_int8_t *prefixlen, int withdraw)
+{
+	int		rv, done = 0;
+	u_int8_t	pfxlen;
+	u_int16_t	plen;
+
+	if (len < 1)
+		return (-1);
+
+	memcpy(&pfxlen, p, 1);
+	p += 1;
+	plen = 1;
+
+	memset(prefix, 0, sizeof(struct bgpd_addr));
+
+	/* label stack */
+	do {
+		if (len - plen < 3 || pfxlen < 3 * 8)
+			return (-1);
+		if (prefix->vpn6.labellen + 3U >
+		    sizeof(prefix->vpn6.labelstack))
+			return (-1);
+		if (withdraw) {
+			/* on withdraw ignore the labelstack all together */
+			plen += 3;
+			pfxlen -= 3 * 8;
+			break;
+		}
+
+		prefix->vpn6.labelstack[prefix->vpn6.labellen++] = *p++;
+		prefix->vpn6.labelstack[prefix->vpn6.labellen++] = *p++;
+		prefix->vpn6.labelstack[prefix->vpn6.labellen] = *p++;
+		if (prefix->vpn6.labelstack[prefix->vpn6.labellen] &
+		    BGP_MPLS_BOS)
+			done = 1;
+		prefix->vpn6.labellen++;
+		plen += 3;
+		pfxlen -= 3 * 8;
+	} while (!done);
+
+	/* RD */
+	if (len - plen < (int)sizeof(u_int64_t) ||
+	    pfxlen < sizeof(u_int64_t) * 8)
+		return (-1);
+
+	memcpy(&prefix->vpn6.rd, p, sizeof(u_int64_t));
+	pfxlen -= sizeof(u_int64_t) * 8;
+	p += sizeof(u_int64_t);
+	plen += sizeof(u_int64_t);
+
+	/* prefix */
+	prefix->aid = AID_VPN_IPv6;
+	*prefixlen = pfxlen;
+
+	if (pfxlen > 128)
+		return (-1);
+
+	if ((rv = extract_prefix(p, len, &prefix->vpn6.addr,
+	    pfxlen, sizeof(prefix->vpn6.addr))) == -1)
+		return (-1);
+
+	return (plen + rv);
+}
+
+
+
+/*
+ * This function will have undefined behaviour if the passed in prefixlen is
+ * too large for the respective bgpd_addr address family.
+ */
 int
 prefix_compare(const struct bgpd_addr *a, const struct bgpd_addr *b,
     int prefixlen)
@@ -422,8 +663,10 @@ prefix_compare(const struct bgpd_addr *a, const struct bgpd_addr *b,
 
 	switch (a->aid) {
 	case AID_INET:
+		if (prefixlen == 0)
+			return (0);
 		if (prefixlen > 32)
-			fatalx("prefix_cmp: bad IPv4 prefixlen");
+			return (-1);
 		mask = htonl(prefixlen2mask(prefixlen));
 		aa = ntohl(a->v4.s_addr & mask);
 		ba = ntohl(b->v4.s_addr & mask);
@@ -431,8 +674,10 @@ prefix_compare(const struct bgpd_addr *a, const struct bgpd_addr *b,
 			return (aa - ba);
 		return (0);
 	case AID_INET6:
+		if (prefixlen == 0)
+			return (0);
 		if (prefixlen > 128)
-			fatalx("prefix_cmp: bad IPv6 prefixlen");
+			return (-1);
 		for (i = 0; i < prefixlen / 8; i++)
 			if (a->v6.s6_addr[i] != b->v6.s6_addr[i])
 				return (a->v6.s6_addr[i] - b->v6.s6_addr[i]);
@@ -447,10 +692,10 @@ prefix_compare(const struct bgpd_addr *a, const struct bgpd_addr *b,
 		return (0);
 	case AID_VPN_IPv4:
 		if (prefixlen > 32)
-			fatalx("prefix_cmp: bad IPv4 VPN prefixlen");
-		if (betoh64(a->vpn4.rd) > betoh64(b->vpn4.rd))
+			return (-1);
+		if (be64toh(a->vpn4.rd) > be64toh(b->vpn4.rd))
 			return (1);
-		if (betoh64(a->vpn4.rd) < betoh64(b->vpn4.rd))
+		if (be64toh(a->vpn4.rd) < be64toh(b->vpn4.rd))
 			return (-1);
 		mask = htonl(prefixlen2mask(prefixlen));
 		aa = ntohl(a->vpn4.addr.s_addr & mask);
@@ -463,8 +708,32 @@ prefix_compare(const struct bgpd_addr *a, const struct bgpd_addr *b,
 			return (-1);
 		return (memcmp(a->vpn4.labelstack, b->vpn4.labelstack,
 		    a->vpn4.labellen));
-	default:
-		fatalx("prefix_cmp: unknown af");
+	case AID_VPN_IPv6:
+		if (prefixlen > 128)
+			return (-1);
+		if (be64toh(a->vpn6.rd) > be64toh(b->vpn6.rd))
+			return (1);
+		if (be64toh(a->vpn6.rd) < be64toh(b->vpn6.rd))
+			return (-1);
+		for (i = 0; i < prefixlen / 8; i++)
+			if (a->vpn6.addr.s6_addr[i] != b->vpn6.addr.s6_addr[i])
+				return (a->vpn6.addr.s6_addr[i] -
+				    b->vpn6.addr.s6_addr[i]);
+		i = prefixlen % 8;
+		if (i) {
+			m = 0xff00 >> i;
+			if ((a->vpn6.addr.s6_addr[prefixlen / 8] & m) !=
+			    (b->vpn6.addr.s6_addr[prefixlen / 8] & m))
+				return ((a->vpn6.addr.s6_addr[prefixlen / 8] &
+				    m) - (b->vpn6.addr.s6_addr[prefixlen / 8] &
+				    m));
+		}
+		if (a->vpn6.labellen > b->vpn6.labellen)
+			return (1);
+		if (a->vpn6.labellen < b->vpn6.labellen)
+			return (-1);
+		return (memcmp(a->vpn6.labelstack, b->vpn6.labelstack,
+		    a->vpn6.labellen));
 	}
 	return (-1);
 }
@@ -476,6 +745,15 @@ prefixlen2mask(u_int8_t prefixlen)
 		return (0);
 
 	return (0xffffffff << (32 - prefixlen));
+}
+
+void
+inet4applymask(struct in_addr *dest, const struct in_addr *src, int prefixlen)
+{
+	struct in_addr mask;
+
+	mask.s_addr = htonl(prefixlen2mask(prefixlen));
+	dest->s_addr = src->s_addr & mask.s_addr;
 }
 
 void
@@ -557,7 +835,7 @@ af2aid(sa_family_t af, u_int8_t safi, u_int8_t *aid)
 }
 
 struct sockaddr *
-addr2sa(struct bgpd_addr *addr, u_int16_t port)
+addr2sa(struct bgpd_addr *addr, u_int16_t port, socklen_t *len)
 {
 	static struct sockaddr_storage	 ss;
 	struct sockaddr_in		*sa_in = (struct sockaddr_in *)&ss;
@@ -570,17 +848,17 @@ addr2sa(struct bgpd_addr *addr, u_int16_t port)
 	switch (addr->aid) {
 	case AID_INET:
 		sa_in->sin_family = AF_INET;
-		sa_in->sin_len = sizeof(struct sockaddr_in);
 		sa_in->sin_addr.s_addr = addr->v4.s_addr;
 		sa_in->sin_port = htons(port);
+		*len = sizeof(struct sockaddr_in);
 		break;
 	case AID_INET6:
 		sa_in6->sin6_family = AF_INET6;
-		sa_in6->sin6_len = sizeof(struct sockaddr_in6);
 		memcpy(&sa_in6->sin6_addr, &addr->v6,
 		    sizeof(sa_in6->sin6_addr));
 		sa_in6->sin6_port = htons(port);
 		sa_in6->sin6_scope_id = addr->scope_id;
+		*len = sizeof(struct sockaddr_in6);
 		break;
 	}
 
@@ -588,7 +866,7 @@ addr2sa(struct bgpd_addr *addr, u_int16_t port)
 }
 
 void
-sa2addr(struct sockaddr *sa, struct bgpd_addr *addr)
+sa2addr(struct sockaddr *sa, struct bgpd_addr *addr, u_int16_t *port)
 {
 	struct sockaddr_in		*sa_in = (struct sockaddr_in *)sa;
 	struct sockaddr_in6		*sa_in6 = (struct sockaddr_in6 *)sa;
@@ -598,11 +876,39 @@ sa2addr(struct sockaddr *sa, struct bgpd_addr *addr)
 	case AF_INET:
 		addr->aid = AID_INET;
 		memcpy(&addr->v4, &sa_in->sin_addr, sizeof(addr->v4));
+		if (port)
+			*port = ntohs(sa_in->sin_port);
 		break;
 	case AF_INET6:
 		addr->aid = AID_INET6;
 		memcpy(&addr->v6, &sa_in6->sin6_addr, sizeof(addr->v6));
 		addr->scope_id = sa_in6->sin6_scope_id; /* I hate v6 */
+		if (port)
+			*port = ntohs(sa_in6->sin6_port);
 		break;
 	}
+}
+
+const char *
+get_baudrate(unsigned long long baudrate, char *unit)
+{
+	static char bbuf[16];
+	const unsigned long long kilo = 1000;
+	const unsigned long long mega = 1000ULL * kilo;
+	const unsigned long long giga = 1000ULL * mega;
+
+	if (baudrate > giga)
+		snprintf(bbuf, sizeof(bbuf), "%llu G%s",
+		    baudrate / giga, unit);
+	else if (baudrate > mega)
+		snprintf(bbuf, sizeof(bbuf), "%llu M%s",
+		    baudrate / mega, unit);
+	else if (baudrate > kilo)
+		snprintf(bbuf, sizeof(bbuf), "%llu K%s",
+		    baudrate / kilo, unit);
+	else
+		snprintf(bbuf, sizeof(bbuf), "%llu %s",
+		    baudrate, unit);
+
+	return (bbuf);
 }

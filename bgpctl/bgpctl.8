@@ -1,4 +1,4 @@
-.\" $OpenBSD: bgpctl.8,v 1.59 2012/05/27 20:49:42 jmc Exp $
+.\" $OpenBSD: bgpctl.8,v 1.85 2019/01/20 23:30:15 claudio Exp $
 .\"
 .\" Copyright (c) 2003 Henning Brauer <henning@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: May 27 2012 $
+.Dd $Mdocdate: December 12 2018 $
 .Dt BGPCTL 8
 .Os
 .Sh NAME
@@ -44,10 +44,20 @@ Show neighbors' IP addresses instead of their description.
 .It Fl s Ar socket
 Use
 .Ar socket
-instead of the default
-.Pa /var/run/bgpd.sock
 to communicate with
-.Xr bgpd 8 .
+.Xr bgpd 8
+instead of the default
+.Pa /var/run/bgpd.sock.<rdomain>
+where
+.Ar <rdomain>
+is the routing domain
+.Nm
+is running in.
+To administer
+.Xr bgpd 8
+in a different routing domain, run
+.Nm
+in said routing domain.
 .El
 .Pp
 The commands are as follows:
@@ -95,32 +105,86 @@ Fetch only IPv6 prefixes from the registry.
 Disable verbose debug logging.
 .It Cm log verbose
 Enable verbose debug logging.
-.It Cm neighbor Ar peer Cm up
-Take the BGP session to the specified neighbor up.
-.Ar peer
-may be the neighbor's address or description.
-.It Cm neighbor Ar peer Cm down
-Take the BGP session to the specified neighbor down.
-.Ar peer
-may be the neighbor's address or description.
-.It Cm neighbor Ar peer Cm clear
+.It Cm neighbor Ar peer Cm clear Op Ar reason
 Stop and restart the BGP session to the specified neighbor.
+If a
+.Ar reason
+is provided, the
+.Ar reason
+is sent as Administrative Shutdown Communication to the neighbor.
+The
+.Ar reason
+cannot exceed 128 octets.
 .Ar peer
-may be the neighbor's address or description.
+may be the neighbor's address, description or the word
+.Cm group
+followed by a group description.
+.It Cm neighbor Ar peer Cm destroy
+Destroy a previously cloned peer.
+The peer must be down before calling this function.
+.Ar peer
+may be the neighbor's address, description or the word
+.Cm group
+followed by a group description.
+.It Cm neighbor Ar peer Cm down Op Ar reason
+Take the BGP session to the specified neighbor down.
+If a
+.Ar reason
+is provided, the
+.Ar reason
+is sent as Administrative Shutdown Communication to the neighbor.
+The
+.Ar reason
+cannot exceed 128 octets.
+.Ar peer
+may be the neighbor's address, description or the word
+.Cm group
+followed by a group description.
 .It Cm neighbor Ar peer Cm refresh
 Request the neighbor to re-send all routes.
 Note that the neighbor is not obliged to re-send all routes, or any routes at
 all, even if it announced the route refresh capability.
 .Ar peer
-may be the neighbor's address or description.
+may be the neighbor's address, description or the word
+.Cm group
+followed by a group description.
+.It Cm neighbor Ar peer Cm up
+Bring the BGP session to the specified neighbor up.
+.Ar peer
+may be the neighbor's address, description or the word
+.Cm group
+followed by a group description.
 .It Cm network add Ar prefix Op Ar arguments
 Add the specified prefix to the list of announced networks.
 It is possible to set various path attributes with additional
 .Ar arguments .
+Adding a prefix will replace an existing equal prefix, including
+prefixes loaded from the configuration.
+.It Xo
+.Cm network bulk
+.Op Ar arguments
+.Op Cm add
+.Xc
+Bulk add specified prefixes to the list of announced networks.
+Prefixes should be sent via stdin.
+It is possible to set various path attributes with additional
+.Ar arguments .
+If neither
+.Cm add
+or
+.Cm delete
+is given,
+.Cm add
+is the default.
+.It Cm network bulk delete
+Bulk remove the specified prefixes from the list of announced networks.
+Prefixes should be sent via stdin.
 .It Cm network delete Ar prefix
 Remove the specified prefix from the list of announced networks.
 .It Cm network flush
-Remove all dynamically added prefixes from the list of announced networks.
+Remove all dynamically (i.e. with
+.Nm Cm network add )
+added prefixes from the list of announced networks.
 .It Cm network mrt file Ar file filter
 Import networks from an MRT table dump for debugging purposes.
 .Ar filter
@@ -226,16 +290,9 @@ instead of using stdin.
 .El
 .Pp
 Multiple options and filters can be used at the same time.
-.It Cm show summary
-Show a list of all neighbors, including information about the session state
-and message counters.
-.It Cm show summary terse
-Show a list of all neighbors, including information about the session state,
-in a terse format.
 .It Cm show neighbor Ar peer modifier
 Show detailed information about the neighbor identified by
 .Ar peer ,
-which may be the neighbor's address or description,
 according to the given
 .Ar modifier :
 .Pp
@@ -251,6 +308,10 @@ prefix count, the number of sent and received updates, and withdraws.
 .It Cm timers
 Show the BGP timers.
 .El
+.Ar peer
+may be the neighbor's address, description or the word
+.Cm group
+followed by a group description.
 .It Cm show nexthop
 Show the list of BGP nexthops and the result of their validity check.
 .It Xo
@@ -282,12 +343,17 @@ anywhere in the AS path.
 .It Cm community Ar community
 Show all entries with community
 .Ar community .
+.It Cm large-community Ar large-community
+Show all entries with large-community
+.Ar large-community .
 .It Cm empty-as
 Show all entries that are internal routes with no AS's in the AS path.
 .It Cm memory
 Show RIB memory statistics.
 .It Cm neighbor Ar peer
 Show only entries from the specified peer.
+.It Cm neighbor group Ar description
+Show only entries from the specified peer group.
 .It Cm peer-as Ar as
 Show all entries with
 .Ar as
@@ -306,26 +372,41 @@ Show only entries from the specified RIB table.
 Show all entries with
 .Ar as
 anywhere but rightmost.
+.It Cm ovs Pq Ic valid | not-found | invalid
+Show all entries with matching Origin Validation State (OVS).
 .El
 .Pp
 Additionally, the following
 .Ar options
 are defined:
 .Pp
-.Bl -tag -width "detail" -compact
+.Bl -tag -width "selected" -compact
+.It Cm best
+Alias for
+.Ic selected .
+.It Cm error
+Show only prefixes which are marked invalid and were treated as withdrawn.
 .It Cm selected
 Show only selected routes.
+.It Cm ssv
+Show each RIB entry as a single line, with fields separated by semicolons.
+Only works if
+.Cm detail
+is specified.
 .It Cm detail
 Show more detailed output for matching routes.
 .It Ar family
 Limit the output to the given address family.
 .It Cm in
 Show routes from the unfiltered Adj-RIB-In.
-This is only possible if
-.Em softreconfig in
-is enabled for the neighbor.
+The
+.Cm neighbor
+needs to be specified.
 .It Cm out
-Show the filtered routes sent to a neighbor also known as Adj-RIB-Out.
+Show the filtered routes sent to a neighbor.
+The
+.Cm neighbor
+needs to be specified.
 .El
 .Pp
 Options are silently ignored when used together with
@@ -337,7 +418,26 @@ Multiple options can be used at the same time and the
 filter can be combined with other filters.
 .It Cm show summary
 Show a list of all neighbors, including information about the session state
-and message counters.
+and message counters:
+.Pp
+.Bl -tag -width xxxxxxxxxxxxxx -compact
+.It Neighbor
+Description of the neighbor.
+.It AS
+Autonomous system number.
+.It MsgRcvd
+Number of messages received from the neighbor.
+.It MsgSent
+Number of messages sent to the neighbor.
+.It OutQ
+Number of outgoing messages queued.
+.It Up/Down
+Number of days and hours that the session has been up.
+.It State/PrfRcvd
+State of the session / Number of routes received.
+The session is up if there is no information for the State column
+(Established is not displayed).
+.El
 .It Cm show summary terse
 Show a list of all neighbors, including information about the session state,
 in a terse format.

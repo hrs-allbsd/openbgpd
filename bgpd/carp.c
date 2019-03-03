@@ -1,4 +1,4 @@
-/*	$OpenBSD: carp.c,v 1.6 2008/09/10 15:00:01 tobias Exp $ */
+/*	$OpenBSD: carp.c,v 1.9 2017/01/24 04:22:42 benno Exp $ */
 
 /*
  * Copyright (c) 2006 Henning Brauer <henning@openbsd.org>
@@ -28,6 +28,7 @@
 
 #include "bgpd.h"
 #include "session.h"
+#include "log.h"
 
 struct carpgroup {
 	TAILQ_ENTRY(carpgroup)	 entry;
@@ -162,7 +163,7 @@ carp_demote_ioctl(char *group, int demote)
 	struct ifgroupreq	ifgr;
 
 	if ((s = socket(AF_INET, SOCK_DGRAM, 0)) == -1) {
-		log_warn("carp_demote_get: socket");
+		log_warn("%s: socket", __func__);
 		return (-1);
 	}
 

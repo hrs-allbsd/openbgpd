@@ -1,7 +1,9 @@
-/*	$OpenBSD: printconf.c,v 1.88 2012/09/23 09:39:18 claudio Exp $	*/
+/*	$OpenBSD: printconf.c,v 1.132 2019/02/26 10:49:15 claudio Exp $	*/
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+ * Copyright (c) 2016 Job Snijders <job@instituut.net>
+ * Copyright (c) 2016 Peter Hessler <phessler@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -25,103 +27,244 @@
 #include "mrt.h"
 #include "session.h"
 #include "rde.h"
+#include "log.h"
 
-void		 print_op(enum comp_ops);
-void		 print_community(int, int);
-void		 print_extcommunity(struct filter_extcommunity *);
+void		 print_prefix(struct filter_prefix *p);
+const char	*community_type(struct filter_community *c);
+void		 print_community(struct filter_community *c);
 void		 print_origin(u_int8_t);
 void		 print_set(struct filter_set_head *);
 void		 print_mainconf(struct bgpd_config *);
-void		 print_rdomain_targets(struct filter_set_head *, const char *);
-void		 print_rdomain(struct rdomain *);
+void		 print_l3vpn_targets(struct filter_set_head *, const char *);
+void		 print_l3vpn(struct l3vpn *);
 const char	*print_af(u_int8_t);
-void		 print_network(struct network_config *);
+void		 print_network(struct network_config *, const char *);
+void		 print_as_sets(struct as_set_head *);
+void		 print_prefixsets(struct prefixset_head *);
+void		 print_originsets(struct prefixset_head *);
+void		 print_roa(struct prefixset_tree *p);
 void		 print_peer(struct peer_config *, struct bgpd_config *,
 		    const char *);
 const char	*print_auth_alg(u_int8_t);
 const char	*print_enc_alg(u_int8_t);
 void		 print_announce(struct peer_config *, const char *);
+void		 print_as(struct filter_rule *);
 void		 print_rule(struct peer *, struct filter_rule *);
-const char *	 mrt_type(enum mrt_type);
-void		 print_mrt(u_int32_t, u_int32_t, const char *, const char *);
+const char	*mrt_type(enum mrt_type);
+void		 print_mrt(struct bgpd_config *, u_int32_t, u_int32_t,
+		    const char *, const char *);
 void		 print_groups(struct bgpd_config *, struct peer *);
 int		 peer_compare(const void *, const void *);
 
 void
-print_op(enum comp_ops op)
+print_prefix(struct filter_prefix *p)
 {
-	switch (op) {
-	case OP_RANGE:
-		printf("-");
+	u_int8_t max_len = 0;
+
+	switch (p->addr.aid) {
+	case AID_INET:
+	case AID_VPN_IPv4:
+		max_len = 32;
 		break;
-	case OP_XRANGE:
-		printf("><");
+	case AID_INET6:
+	case AID_VPN_IPv6:
+		max_len = 128;
 		break;
-	case OP_EQ:
-		printf("=");
+	case AID_UNSPEC:
+		/* no prefix to print */
+		return;
+	}
+
+	printf("%s/%u", log_addr(&p->addr), p->len);
+
+	switch (p->op) {
+	case OP_NONE:
 		break;
 	case OP_NE:
-		printf("!=");
+		printf(" prefixlen != %u", p->len_min);
 		break;
-	case OP_LE:
-		printf("<=");
+	case OP_XRANGE:
+		printf(" prefixlen %u >< %u ", p->len_min, p->len_max);
 		break;
-	case OP_LT:
-		printf("<");
-		break;
-	case OP_GE:
-		printf(">=");
-		break;
-	case OP_GT:
-		printf(">");
+	case OP_RANGE:
+		if (p->len_min == p->len_max && p->len != p->len_min)
+			printf(" prefixlen = %u", p->len_min);
+		else if (p->len == p->len_min && p->len_max == max_len)
+			printf(" or-longer");
+		else if (p->len == p->len_min && p->len != p->len_max)
+			printf(" maxlen %u", p->len_max);
+		else if (p->len_max == max_len)
+			printf(" prefixlen >= %u", p->len_min);
+		else
+			printf(" prefixlen %u - %u", p->len_min, p->len_max);
 		break;
 	default:
-		printf("?");
+		printf(" prefixlen %u ??? %u", p->len_min, p->len_max);
 		break;
 	}
 }
 
-void
-print_community(int as, int type)
+const char *
+community_type(struct filter_community *c)
 {
-	if (as == COMMUNITY_ANY)
-		printf("*:");
-	else if (as == COMMUNITY_NEIGHBOR_AS)
-		printf("neighbor-as:");
-	else
-		printf("%d:", as);
-
-	if (type == COMMUNITY_ANY)
-		printf("* ");
-	else if (type == COMMUNITY_NEIGHBOR_AS)
-		printf("neighbor-as ");
-	else
-		printf("%d ", type);
+	switch (c->type) {
+	case COMMUNITY_TYPE_BASIC:
+		return "community";
+	case COMMUNITY_TYPE_LARGE:
+		return "large-community";
+	case COMMUNITY_TYPE_EXT:
+		return "ext-community";
+	default:
+		return "???";
+	}
 }
 
 void
-print_extcommunity(struct filter_extcommunity *c)
+print_community(struct filter_community *c)
 {
-	switch (c->type & EXT_COMMUNITY_VALUE) {
-	case EXT_COMMUNITY_TWO_AS:
-		printf("%s %i:%i ", log_ext_subtype(c->subtype),
-		    c->data.ext_as.as, c->data.ext_as.val);
+	struct in_addr addr;
+
+	switch (c->type) {
+	case COMMUNITY_TYPE_BASIC:
+		switch (c->dflag1) {
+		case COMMUNITY_ANY:
+			printf("*:");
+			break;
+		case COMMUNITY_NEIGHBOR_AS:
+			printf("neighbor-as:");
+			break;
+		case COMMUNITY_LOCAL_AS:
+			printf("local-as:");
+			break;
+		default:
+			printf("%u:", c->c.b.data1);
+			break;
+		}
+		switch (c->dflag2) {
+		case COMMUNITY_ANY:
+			printf("* ");
+			break;
+		case COMMUNITY_NEIGHBOR_AS:
+			printf("neighbor-as ");
+			break;
+		case COMMUNITY_LOCAL_AS:
+			printf("local-as ");
+			break;
+		default:
+			printf("%u ", c->c.b.data2);
+			break;
+		}
 		break;
-	case EXT_COMMUNITY_IPV4:
-		printf("%s %s:%i ", log_ext_subtype(c->subtype),
-		    inet_ntoa(c->data.ext_ip.addr), c->data.ext_ip.val);
+	case COMMUNITY_TYPE_LARGE:
+		switch (c->dflag1) {
+		case COMMUNITY_ANY:
+			printf("*:");
+			break;
+		case COMMUNITY_NEIGHBOR_AS:
+			printf("neighbor-as:");
+			break;
+		case COMMUNITY_LOCAL_AS:
+			printf("local-as:");
+			break;
+		default:
+			printf("%u:", c->c.l.data1);
+			break;
+		}
+		switch (c->dflag2) {
+		case COMMUNITY_ANY:
+			printf("*:");
+			break;
+		case COMMUNITY_NEIGHBOR_AS:
+			printf("neighbor-as:");
+			break;
+		case COMMUNITY_LOCAL_AS:
+			printf("local-as:");
+			break;
+		default:
+			printf("%u:", c->c.l.data2);
+			break;
+		}
+		switch (c->dflag3) {
+		case COMMUNITY_ANY:
+			printf("* ");
+			break;
+		case COMMUNITY_NEIGHBOR_AS:
+			printf("neighbor-as ");
+			break;
+		case COMMUNITY_LOCAL_AS:
+			printf("local-as ");
+			break;
+		default:
+			printf("%u ", c->c.l.data3);
+			break;
+		}
 		break;
-	case EXT_COMMUNITY_FOUR_AS:
-		printf("%s %s:%i ", log_ext_subtype(c->subtype),
-		    log_as(c->data.ext_as4.as4), c->data.ext_as.val);
-		break;
-	case EXT_COMMUNITY_OPAQUE:
-		printf("%s 0x%llx ", log_ext_subtype(c->subtype),
-		    c->data.ext_opaq);
-		break;
-	default:
-		printf("0x%x 0x%llx ", c->type, c->data.ext_opaq);
-		break;
+	case COMMUNITY_TYPE_EXT:
+		if (c->dflag3 == COMMUNITY_ANY) {
+			printf("* * ");
+			break;
+		}
+		printf("%s ", log_ext_subtype(c->c.e.type, c->c.e.subtype));
+		if (c->dflag1 == COMMUNITY_ANY) {
+			printf("* ");
+			break;
+		}
+
+		switch (c->c.e.type) {
+		case EXT_COMMUNITY_TRANS_TWO_AS:
+		case EXT_COMMUNITY_TRANS_FOUR_AS:
+			if (c->dflag1 == COMMUNITY_NEIGHBOR_AS)
+				printf("neighbor-as:");
+			else if (c->dflag1 == COMMUNITY_LOCAL_AS)
+				printf("local-as:");
+			else
+				printf("%s:", log_as(c->c.e.data1));
+			break;
+		case EXT_COMMUNITY_TRANS_IPV4:
+			addr.s_addr = htonl(c->c.e.data1);
+			printf("%s:", inet_ntoa(addr));
+			break;
+		}
+
+		switch (c->c.e.type) {
+		case EXT_COMMUNITY_TRANS_TWO_AS:
+		case EXT_COMMUNITY_TRANS_FOUR_AS:
+		case EXT_COMMUNITY_TRANS_IPV4:
+			if (c->dflag2 == COMMUNITY_ANY)
+				printf("* ");
+			else if (c->dflag2 == COMMUNITY_NEIGHBOR_AS)
+				printf("neighbor-as ");
+			else if (c->dflag2 == COMMUNITY_LOCAL_AS)
+				printf("local-as ");
+			else
+				printf("%llu ",
+				    (unsigned long long)c->c.e.data2);
+			break;
+		case EXT_COMMUNITY_TRANS_OPAQUE:
+		case EXT_COMMUNITY_TRANS_EVPN:
+			printf("0x%llx ", (unsigned long long)c->c.e.data2);
+			break;
+		case EXT_COMMUNITY_NON_TRANS_OPAQUE:
+			if (c->c.e.subtype == EXT_COMMUNITY_SUBTYPE_OVS) {
+				switch (c->c.e.data2) {
+				case EXT_COMMUNITY_OVS_VALID:
+					printf("valid ");
+					break;
+				case EXT_COMMUNITY_OVS_NOTFOUND:
+					printf("not-found ");
+					break;
+				case EXT_COMMUNITY_OVS_INVALID:
+					printf("invalid ");
+					break;
+				}
+				break;
+			}
+			printf("0x%llx ", (unsigned long long)c->c.e.data2);
+			break;
+		default:
+			printf("0x%llx ", (unsigned long long)c->c.e.data2);
+			break;
+		}
 	}
 }
 
@@ -188,17 +331,17 @@ print_set(struct filter_set_head *set)
 		case ACTION_SET_PREPEND_PEER:
 			printf("prepend-neighbor %u ", s->action.prepend);
 			break;
+		case ACTION_SET_AS_OVERRIDE:
+			printf("as-override ");
+			break;
 		case ACTION_DEL_COMMUNITY:
-			printf("community delete ");
-			print_community(s->action.community.as,
-			    s->action.community.type);
-			printf(" ");
+			printf("%s delete ",
+			    community_type(&s->action.community));
+			print_community(&s->action.community);
 			break;
 		case ACTION_SET_COMMUNITY:
-			printf("community ");
-			print_community(s->action.community.as,
-			    s->action.community.type);
-			printf(" ");
+			printf("%s ", community_type(&s->action.community));
+			print_community(&s->action.community);
 			break;
 		case ACTION_PFTABLE:
 			printf("pftable %s ", s->action.pftable);
@@ -214,14 +357,6 @@ print_set(struct filter_set_head *set)
 		case ACTION_PFTABLE_ID:
 			/* not possible */
 			printf("king bula saiz: config broken");
-			break;
-		case ACTION_SET_EXT_COMMUNITY:
-			printf("ext-community ");
-			print_extcommunity(&s->action.ext_community);
-			break;
-		case ACTION_DEL_EXT_COMMUNITY:
-			printf("ext-community delete ");
-			print_extcommunity(&s->action.ext_community);
 			break;
 		}
 	}
@@ -264,40 +399,45 @@ print_mainconf(struct bgpd_config *conf)
 
 	TAILQ_FOREACH(la, conf->listen_addrs, entry)
 		printf("listen on %s\n",
-		    log_sockaddr((struct sockaddr *)&la->sa));
+		    log_sockaddr((struct sockaddr *)&la->sa, la->sa_len));
 
 	if (conf->flags & BGPD_FLAG_NEXTHOP_BGP)
 		printf("nexthop qualify via bgp\n");
 	if (conf->flags & BGPD_FLAG_NEXTHOP_DEFAULT)
 		printf("nexthop qualify via default\n");
+	printf("fib-priority %hhu", conf->fib_priority);
+	printf("\n\n");
 }
 
 void
-print_rdomain_targets(struct filter_set_head *set, const char *tgt)
+print_l3vpn_targets(struct filter_set_head *set, const char *tgt)
 {
 	struct filter_set	*s;
 	TAILQ_FOREACH(s, set, entry) {
 		printf("\t%s ", tgt);
-		print_extcommunity(&s->action.ext_community);
+		print_community(&s->action.community);
 		printf("\n");
 	}
 }
 
 void
-print_rdomain(struct rdomain *r)
+print_l3vpn(struct l3vpn *vpn)
 {
-	printf("rdomain %u {\n", r->rtableid);
-	printf("\tdescr \"%s\"\n", r->descr);
-	if (r->flags & F_RIB_NOFIBSYNC)
+	struct network *n;
+
+	printf("vpn \"%s\" on %s {\n", vpn->descr, vpn->ifmpe);
+	printf("\t%s\n", log_rd(vpn->rd));
+
+	print_l3vpn_targets(&vpn->export, "export-target");
+	print_l3vpn_targets(&vpn->import, "import-target");
+
+	if (vpn->flags & F_RIB_NOFIBSYNC)
 		printf("\tfib-update no\n");
 	else
 		printf("\tfib-update yes\n");
-	printf("\tdepend on %s\n", r->ifmpe);
 
-	printf("\n\t%s\n", log_rd(r->rd));
-
-	print_rdomain_targets(&r->export, "export-target");
-	print_rdomain_targets(&r->import, "import-target");
+	TAILQ_FOREACH(n, &vpn->net_l, entry)
+		print_network(&n->net, "\t");
 
 	printf("}\n");
 }
@@ -318,23 +458,125 @@ print_af(u_int8_t aid)
 }
 
 void
-print_network(struct network_config *n)
+print_network(struct network_config *n, const char *c)
 {
 	switch (n->type) {
 	case NETWORK_STATIC:
-		printf("network %s static", print_af(n->prefix.aid));
+		printf("%snetwork %s static", c, print_af(n->prefix.aid));
 		break;
 	case NETWORK_CONNECTED:
-		printf("network %s connected", print_af(n->prefix.aid));
+		printf("%snetwork %s connected", c, print_af(n->prefix.aid));
+		break;
+	case NETWORK_RTLABEL:
+		printf("%snetwork %s rtlabel \"%s\"", c,
+		    print_af(n->prefix.aid), rtlabel_id2name(n->rtlabel));
+		break;
+	case NETWORK_PRIORITY:
+		printf("%snetwork %s priority %d", c,
+		    print_af(n->prefix.aid), n->priority);
+		break;
+	case NETWORK_PREFIXSET:
+		printf("%snetwork prefix-set %s", c, n->psname);
 		break;
 	default:
-		printf("network %s/%u", log_addr(&n->prefix), n->prefixlen);
+		printf("%snetwork %s/%u", c, log_addr(&n->prefix),
+		    n->prefixlen);
 		break;
 	}
 	if (!TAILQ_EMPTY(&n->attrset))
 		printf(" ");
 	print_set(&n->attrset);
 	printf("\n");
+}
+
+void
+print_as_sets(struct as_set_head *as_sets)
+{
+	struct as_set *aset;
+	u_int32_t *as;
+	size_t i, n;
+	int len;
+
+	SIMPLEQ_FOREACH(aset, as_sets, entry) {
+		printf("as-set \"%s\" {\n\t", aset->name);
+		as = set_get(aset->set, &n);
+		for (i = 0, len = 8; i < n; i++) {
+			if (len > 72) {
+				printf("\n\t");
+				len = 8;
+			}
+			len += printf("%u ", as[i]);
+		}
+		printf("\n}\n\n");
+	}
+}
+
+void
+print_prefixsets(struct prefixset_head *psh)
+{
+	struct prefixset	*ps;
+	struct prefixset_item	*psi;
+
+	SIMPLEQ_FOREACH(ps, psh, entry) {
+		int count = 0;
+		printf("prefix-set \"%s\" {", ps->name);
+		RB_FOREACH(psi, prefixset_tree, &ps->psitems) {
+			if (count++ % 2 == 0)
+				printf("\n\t");
+			else
+				printf(", ");
+			print_prefix(&psi->p);
+		}
+		printf("\n}\n\n");
+	}
+}
+
+void
+print_originsets(struct prefixset_head *psh)
+{
+	struct prefixset	*ps;
+	struct prefixset_item	*psi;
+	struct roa_set		*rs;
+	size_t			 i, n;
+
+	SIMPLEQ_FOREACH(ps, psh, entry) {
+		printf("origin-set \"%s\" {", ps->name);
+		RB_FOREACH(psi, prefixset_tree, &ps->psitems) {
+			rs = set_get(psi->set, &n);
+			for (i = 0; i < n; i++) {
+				printf("\n\t");
+				print_prefix(&psi->p);
+				if (psi->p.len != rs[i].maxlen)
+					printf(" maxlen %u", rs[i].maxlen);
+				printf(" source-as %u", rs[i].as);
+			}
+		}
+		printf("\n}\n\n");
+	}
+}
+
+void
+print_roa(struct prefixset_tree *p)
+{
+	struct prefixset_item	*psi;
+	struct roa_set		*rs;
+	size_t			 i, n;
+
+	if (RB_EMPTY(p))
+		return;
+
+	printf("roa-set {");
+	RB_FOREACH(psi, prefixset_tree, p) {
+		rs = set_get(psi->set, &n);
+		for (i = 0; i < n; i++) {
+			printf("\n\t");
+			print_prefix(&psi->p);
+			if (psi->p.len != rs[i].maxlen)
+				printf(" maxlen %u", rs[i].maxlen);
+			printf(" source-as %u", rs[i].as);
+		}
+	}
+	printf("\n}\n\n");
 }
 
 void
@@ -355,6 +597,12 @@ print_peer(struct peer_config *p, struct bgpd_config *conf, const char *c)
 		printf("%s\trib \"%s\"\n", c, p->rib);
 	if (p->remote_as)
 		printf("%s\tremote-as %s\n", c, log_as(p->remote_as));
+	if (p->local_as != conf->as) {
+		printf("%s\tlocal-as %s", c, log_as(p->local_as));
+		if (p->local_as > USHRT_MAX && p->local_short_as != AS_TRANS)
+			printf(" %u", p->local_short_as);
+		printf("\n");
+	}
 	if (p->down)
 		printf("%s\tdown\n", c);
 	if (p->distance > 1)
@@ -381,20 +629,18 @@ print_peer(struct peer_config *p, struct bgpd_config *conf, const char *c)
 		printf("%s\tannounce restart no\n", c);
 	if (p->capabilities.as4byte == 0)
 		printf("%s\tannounce as4byte no\n", c);
-	if (p->announce_type == ANNOUNCE_SELF)
-		printf("%s\tannounce self\n", c);
-	else if (p->announce_type == ANNOUNCE_NONE)
-		printf("%s\tannounce none\n", c);
-	else if (p->announce_type == ANNOUNCE_ALL)
-		printf("%s\tannounce all\n", c);
-	else if (p->announce_type == ANNOUNCE_DEFAULT_ROUTE)
-		printf("%s\tannounce default-route\n", c);
-	else
-		printf("%s\tannounce ???\n", c);
+	if (p->export_type == EXPORT_NONE)
+		printf("%s\texport none\n", c);
+	else if (p->export_type == EXPORT_DEFAULT_ROUTE)
+		printf("%s\texport default-route\n", c);
 	if (p->enforce_as == ENFORCE_AS_ON)
 		printf("%s\tenforce neighbor-as yes\n", c);
 	else
 		printf("%s\tenforce neighbor-as no\n", c);
+	if (p->enforce_local_as == ENFORCE_AS_ON)
+		printf("%s\tenforce local-as yes\n", c);
+	else
+		printf("%s\tenforce local-as no\n", c);
 	if (p->reflector_client) {
 		if (conf->clusterid == 0)
 			printf("%s\troute-reflector\n", c);
@@ -410,6 +656,9 @@ print_peer(struct peer_config *p, struct bgpd_config *conf, const char *c)
 		printf("%s\tdepend on \"%s\"\n", c, p->if_depend);
 	if (p->flags & PEERFLAG_TRANS_AS)
 		printf("%s\ttransparent-as yes\n", c);
+
+	if (p->flags & PEERFLAG_LOG_UPDATES)
+		printf("%s\tlog updates\n", c);
 
 	if (p->auth.method == AUTH_MD5SIG)
 		printf("%s\ttcp md5sig\n", c);
@@ -442,18 +691,7 @@ print_peer(struct peer_config *p, struct bgpd_config *conf, const char *c)
 
 	print_announce(p, c);
 
-	if (p->softreconfig_in == 1)
-		printf("%s\tsoftreconfig in yes\n", c);
-	else
-		printf("%s\tsoftreconfig in no\n", c);
-
-	if (p->softreconfig_out == 1)
-		printf("%s\tsoftreconfig out yes\n", c);
-	else
-		printf("%s\tsoftreconfig out no\n", c);
-
-
-	print_mrt(p->id, p->groupid, c, "\t");
+	print_mrt(conf, p->id, p->groupid, c, "\t");
 
 	printf("%s}\n", c);
 }
@@ -494,10 +732,35 @@ print_announce(struct peer_config *p, const char *c)
 			printf("%s\tannounce %s\n", c, aid2str(aid));
 }
 
+void print_as(struct filter_rule *r)
+{
+	if (r->match.as.flags & AS_FLAG_AS_SET_NAME) {
+		printf("as-set \"%s\" ", r->match.as.name);
+		return;
+	}
+	switch(r->match.as.op) {
+	case OP_RANGE:
+		printf("%s - ", log_as(r->match.as.as_min));
+		printf("%s ", log_as(r->match.as.as_max));
+		break;
+	case OP_XRANGE:
+		printf("%s >< ", log_as(r->match.as.as_min));
+		printf("%s ", log_as(r->match.as.as_max));
+		break;
+	case OP_NE:
+		printf("!= %s ", log_as(r->match.as.as_min));
+		break;
+	default:
+		printf("%s ", log_as(r->match.as.as_min));
+		break;
+	}
+}
+
 void
 print_rule(struct peer *peer_l, struct filter_rule *r)
 {
-	struct peer	*p;
+	struct peer *p;
+	int i;
 
 	if (r->action == ACTION_ALLOW)
 		printf("allow ");
@@ -534,32 +797,44 @@ print_rule(struct peer *peer_l, struct filter_rule *r)
 			printf("group ? ");
 		else
 			printf("group \"%s\" ", p->conf.group);
+	} else if (r->peer.remote_as) {
+		printf("AS %s ", log_as(r->peer.remote_as));
+	} else if (r->peer.ebgp) {
+		printf("ebgp ");
+	} else if (r->peer.ibgp) {
+		printf("ibgp ");
 	} else
 		printf("any ");
 
-	if (r->match.prefix.addr.aid)
-		printf("prefix %s/%u ", log_addr(&r->match.prefix.addr),
-		    r->match.prefix.len);
-
-	if (r->match.prefix.addr.aid == 0 && r->match.prefixlen.aid) {
-		if (r->match.prefixlen.aid == AID_INET)
-			printf("inet ");
-		if (r->match.prefixlen.aid == AID_INET6)
-			printf("inet6 ");
-	}
-
-	if (r->match.prefixlen.op) {
-		if (r->match.prefixlen.op == OP_RANGE ||
-		    r->match.prefixlen.op == OP_XRANGE) {
-			printf("prefixlen %u ", r->match.prefixlen.len_min);
-			print_op(r->match.prefixlen.op);
-			printf(" %u ", r->match.prefixlen.len_max);
-		} else {
-			printf("prefixlen ");
-			print_op(r->match.prefixlen.op);
-			printf(" %u ", r->match.prefixlen.len_min);
+	if (r->match.ovs.is_set) {
+		switch (r->match.ovs.validity) {
+		case ROA_VALID:
+			printf("ovs valid ");
+			break;
+		case ROA_INVALID:
+			printf("ovs invalid ");
+			break;
+		case ROA_NOTFOUND:
+			printf("ovs not-found ");
+			break;
+		default:
+			printf("ovs ??? %d ??? ", r->match.ovs.validity);
 		}
 	}
+
+	if (r->match.prefix.addr.aid != AID_UNSPEC) {
+		printf("prefix ");
+		print_prefix(&r->match.prefix);
+		printf(" ");
+	}
+
+	if (r->match.prefixset.name[0] != '\0')
+		printf("prefix-set \"%s\" ", r->match.prefixset.name);
+	if (r->match.prefixset.flags & PREFIXSET_FLAG_LONGER)
+		printf("or-longer ");
+
+	if (r->match.originset.name[0] != '\0')
+		printf("origin-set \"%s\" ", r->match.originset.name);
 
 	if (r->match.nexthop.flags) {
 		if (r->match.nexthop.flags == FILTER_NEXTHOP_NEIGHBOR)
@@ -570,15 +845,16 @@ print_rule(struct peer *peer_l, struct filter_rule *r)
 
 	if (r->match.as.type) {
 		if (r->match.as.type == AS_ALL)
-			printf("AS %s ", log_as(r->match.as.as));
+			printf("AS ");
 		else if (r->match.as.type == AS_SOURCE)
-			printf("source-as %s ", log_as(r->match.as.as));
+			printf("source-as ");
 		else if (r->match.as.type == AS_TRANSIT)
-			printf("transit-as %s ", log_as(r->match.as.as));
+			printf("transit-as ");
 		else if (r->match.as.type == AS_PEER)
-			printf("peer-as %s ", log_as(r->match.as.as));
+			printf("peer-as ");
 		else
-			printf("unfluffy-as %s ", log_as(r->match.as.as));
+			printf("unfluffy-as ");
+		print_as(r);
 	}
 
 	if (r->match.aslen.type) {
@@ -586,14 +862,12 @@ print_rule(struct peer *peer_l, struct filter_rule *r)
 		    "max-as-len" : "max-as-seq", r->match.aslen.aslen);
 	}
 
-	if (r->match.community.as != COMMUNITY_UNSET) {
-		printf("community ");
-		print_community(r->match.community.as,
-		    r->match.community.type);
-	}
-	if (r->match.ext_community.flags & EXT_COMMUNITY_FLAG_VALID) {
-		printf("ext-community ");
-		print_extcommunity(&r->match.ext_community);
+	for (i = 0; i < MAX_COMM_MATCH; i++) {
+		struct filter_community *c = &r->match.community[i];
+		if (c->type != COMMUNITY_TYPE_NONE) {
+			printf("%s ", community_type(c));
+			print_community(c);
+		}
 	}
 
 	print_set(&r->set);
@@ -625,17 +899,16 @@ mrt_type(enum mrt_type t)
 	return "unfluffy MRT";
 }
 
-struct mrt_head	*xmrt_l = NULL;
-
 void
-print_mrt(u_int32_t pid, u_int32_t gid, const char *prep, const char *prep2)
+print_mrt(struct bgpd_config *conf, u_int32_t pid, u_int32_t gid,
+    const char *prep, const char *prep2)
 {
 	struct mrt	*m;
 
-	if (xmrt_l == NULL)
+	if (conf->mrt == NULL)
 		return;
 
-	LIST_FOREACH(m, xmrt_l, entry)
+	LIST_FOREACH(m, conf->mrt, entry)
 		if ((gid != 0 && m->group_id == gid) ||
 		    (m->peer_id == pid && m->group_id == gid)) {
 			printf("%s%sdump ", prep, prep2);
@@ -648,6 +921,8 @@ print_mrt(u_int32_t pid, u_int32_t gid, const char *prep, const char *prep2)
 			else
 				printf(" %d\n", MRT2MC(m)->ReopenTimerInterval);
 		}
+	if (!LIST_EMPTY(conf->mrt))
+		printf("\n");
 }
 
 void
@@ -712,21 +987,24 @@ void
 print_config(struct bgpd_config *conf, struct rib_names *rib_l,
     struct network_head *net_l, struct peer *peer_l,
     struct filter_head *rules_l, struct mrt_head *mrt_l,
-    struct rdomain_head *rdom_l)
+    struct l3vpn_head *vpns_l)
 {
 	struct filter_rule	*r;
 	struct network		*n;
 	struct rde_rib		*rr;
-	struct rdomain		*rd;
+	struct l3vpn		*vpn;
 
-	xmrt_l = mrt_l;
 	print_mainconf(conf);
-	printf("\n");
+	print_roa(&conf->roa);
+	print_as_sets(conf->as_sets);
+	print_prefixsets(&conf->prefixsets);
+	print_originsets(&conf->originsets);
 	TAILQ_FOREACH(n, net_l, entry)
-		print_network(&n->net);
-	printf("\n");
-	SIMPLEQ_FOREACH(rd, rdom_l, entry)
-		print_rdomain(rd);
+		print_network(&n->net, "");
+	if (!SIMPLEQ_EMPTY(vpns_l))
+		printf("\n");
+	SIMPLEQ_FOREACH(vpn, vpns_l, entry)
+		print_l3vpn(vpn);
 	printf("\n");
 	SIMPLEQ_FOREACH(rr, rib_l, entry) {
 		if (rr->flags & F_RIB_NOEVALUATE)
@@ -739,10 +1017,8 @@ print_config(struct bgpd_config *conf, struct rib_names *rib_l,
 			    "no" : "yes");
 	}
 	printf("\n");
-	print_mrt(0, 0, "", "");
-	printf("\n");
+	print_mrt(conf, 0, 0, "", "");
 	print_groups(conf, peer_l);
-	printf("\n");
 	TAILQ_FOREACH(r, rules_l, entry)
 		print_rule(peer_l, r);
 }

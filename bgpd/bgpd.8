@@ -1,4 +1,4 @@
-.\" $OpenBSD: bgpd.8,v 1.45 2012/08/24 20:13:03 jmc Exp $
+.\" $OpenBSD: bgpd.8,v 1.60 2018/12/04 14:13:40 claudio Exp $
 .\"
 .\" Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
 .\"
@@ -14,12 +14,12 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: August 24 2012 $
+.Dd $Mdocdate: November 4 2018 $
 .Dt BGPD 8
 .Os
 .Sh NAME
 .Nm bgpd
-.Nd "Border Gateway Protocol daemon"
+.Nd Border Gateway Protocol daemon
 .Sh SYNOPSIS
 .Nm bgpd
 .Bk -words
@@ -112,10 +112,6 @@ If it is not present then a length of 0 is used in the comparison.
 .It
 The path coming from the peer with the lowest IP address is selected.
 IPv4 sessions will be preferred over IPv6 ones.
-.It
-In case of locally announced prefixes
-.Nm
-will prefer statically set prefixes over dynamically inserted ones.
 .El
 .Pp
 Attributes set by filters can be used to tip the decision process to prefer
@@ -130,7 +126,7 @@ AS path prepending or changing the
 .Em med
 or
 .Em origin
-attribute can be used to influencing the routing behaviour on remote systems.
+attribute can be used to influence the routing behaviour on remote systems.
 .Pp
 .Nm
 is usually started at boot time, and can be enabled by
@@ -347,15 +343,32 @@ control socket
 .Re
 .Pp
 .Rs
-.%D April 2009
-.%R draft-ietf-idr-optional-transitive-00
-.%T Error Handling for Optional Transitive BGP Attributes
+.%A E. Chen
+.%A J. Scudder
+.%A P. Mohapatra
+.%A K. Patel
+.%D August 2015
+.%R RFC 7606
+.%T Revised Error Handling for BGP UPDATE Messages
 .Re
 .Pp
 .Rs
-.%D August 2011
-.%R draft-ietf-grow-mrt-17
-.%T MRT routing information export format
+.%A W. Kumari
+.%A R. Bush
+.%A H. Schiller
+.%A K. Patel
+.%D August 2015
+.%R RFC 7607
+.%T Codification of AS 0 Processing
+.Re
+.Pp
+.Rs
+.%A L. Blunk
+.%A M. Karir
+.%A C. Labovitz
+.%D October 2011
+.%R RFC 6396
+.%T Multi-Threaded Routing Toolkit (MRT) Routing Information Export Format
 .Re
 .Pp
 .Rs
@@ -365,6 +378,57 @@ control socket
 .%D May 2012
 .%R RFC 6608
 .%T Subcodes for BGP Finite State Machine Error
+.Re
+.Pp
+.Rs
+.%A J. Heitz
+.%A J. Snijders
+.%A K. Patel
+.%A I. Bagdonas
+.%A N. Hilliard
+.%D February 2017
+.%R RFC 8092
+.%T BGP Large Communities Attribute
+.Re
+.Pp
+.Rs
+.%A P. Mohapatra
+.%A K. Patel
+.%A J. Scudder
+.%A D. Ward
+.%A R. Bush
+.%D March 2017
+.%R RFC 8097
+.%T BGP Prefix Origin Validation State Extended Community
+.Re
+.Pp
+.Rs
+.%A J. Snijders
+.%A J. Heitz
+.%A J. Scudder
+.%D July 2017
+.%R RFC 8203
+.%T BGP Administrative Shutdown Communication
+.Re
+.Pp
+.Rs
+.%A J. Mauch
+.%A J. Snijders
+.%A G. Hankins
+.%D July 2017
+.%R RFC 8212
+.%T Default External BGP (EBGP) Route Propagation Behavior without Policies
+.Re
+.Pp
+.Rs
+.%A P. Francois
+.%A B. Decraene
+.%A C. Pelsser
+.%A K. Patel
+.%A C. Filsfils
+.%D March 2018
+.%R RFC 8326
+.%T Graceful BGP Session Shutdown
 .Re
 .Sh HISTORY
 The

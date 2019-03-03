@@ -1,4 +1,4 @@
-/*	$OpenBSD: parser.h,v 1.23 2011/09/21 10:37:51 claudio Exp $ */
+/*	$OpenBSD: parser.h,v 1.35 2019/02/11 15:47:55 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -46,12 +46,15 @@ enum actions {
 	NEIGHBOR_DOWN,
 	NEIGHBOR_CLEAR,
 	NEIGHBOR_RREFRESH,
+	NEIGHBOR_DESTROY,
 	NETWORK_ADD,
 	NETWORK_REMOVE,
 	NETWORK_FLUSH,
 	NETWORK_SHOW,
 	NETWORK_MRT,
-	IRRFILTER
+	IRRFILTER,
+	NETWORK_BULK_ADD,
+	NETWORK_BULK_REMOVE
 };
 
 struct parse_result {
@@ -62,8 +65,13 @@ struct parse_result {
 	struct filter_community  community;
 	char			 peerdesc[PEER_DESCR_LEN];
 	char			 rib[PEER_DESCR_LEN];
+	char			 shutcomm[SHUT_COMM_LEN];
 	char			*irr_outdir;
+	const char		*ext_comm_subtype;
+	u_int64_t		 rd;
 	int			 flags;
+	int			 is_group;
+	u_int8_t		 validation_state;
 	u_int			 rtableid;
 	enum actions		 action;
 	u_int8_t		 prefixlen;
@@ -73,3 +81,5 @@ struct parse_result {
 
 __dead void		 usage(void);
 struct parse_result	*parse(int, char *[]);
+int			 parse_prefix(const char *, size_t, struct bgpd_addr *,
+			     u_int8_t *);

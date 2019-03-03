@@ -1,4 +1,4 @@
-/*	$OpenBSD: timer.c,v 1.14 2010/10/24 17:20:08 deraadt Exp $ */
+/*	$OpenBSD: timer.c,v 1.17 2017/01/24 04:22:42 benno Exp $ */
 
 /*
  * Copyright (c) 2003-2007 Henning Brauer <henning@openbsd.org>
@@ -16,12 +16,14 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/param.h>
 #include <sys/types.h>
 #include <stdlib.h>
 
 #include "bgpd.h"
 #include "session.h"
+#include "log.h"
+
+#define MAXIMUM(a, b)	(((a) > (b)) ? (a) : (b))
 
 time_t
 getmonotime(void)
@@ -63,7 +65,7 @@ timer_nextduein(struct peer *p)
 	struct peer_timer *pt;
 
 	if ((pt = TAILQ_FIRST(&p->timers)) != NULL && pt->val > 0)
-		return (MAX(pt->val - getmonotime(), 0));
+		return (MAXIMUM(pt->val - getmonotime(), 0));
 	return (-1);
 }
 

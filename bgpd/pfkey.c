@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfkey.c,v 1.40 2009/12/14 17:38:18 claudio Exp $ */
+/*	$OpenBSD: pfkey.c,v 1.54 2019/02/20 16:29:01 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -31,6 +31,7 @@
 
 #include "bgpd.h"
 #include "session.h"
+#include "log.h"
 
 #define	PFKEY2_CHUNK sizeof(u_int64_t)
 #define	ROUNDUP(x) (((x) + (PFKEY2_CHUNK - 1)) & ~(PFKEY2_CHUNK - 1))
@@ -75,6 +76,7 @@ pfkey_send(int sd, uint8_t satype, uint8_t mtype, uint8_t dir,
 	int			iov_cnt;
 	struct sockaddr_storage	ssrc, sdst, speer, smask, dmask;
 	struct sockaddr		*saptr;
+	socklen_t		 salen;
 
 	if (!pid)
 		pid = getpid();
@@ -82,8 +84,10 @@ pfkey_send(int sd, uint8_t satype, uint8_t mtype, uint8_t dir,
 	/* we need clean sockaddr... no ports set */
 	bzero(&ssrc, sizeof(ssrc));
 	bzero(&smask, sizeof(smask));
-	if ((saptr = addr2sa(src, 0)))
-		memcpy(&ssrc, saptr, sizeof(ssrc));
+	if ((saptr = addr2sa(src, 0, &salen))) {
+		memcpy(&ssrc, saptr, salen);
+		ssrc.ss_len = salen;
+	}
 	switch (src->aid) {
 	case AID_INET:
 		memset(&((struct sockaddr_in *)&smask)->sin_addr, 0xff, 32/8);
@@ -103,8 +107,10 @@ pfkey_send(int sd, uint8_t satype, uint8_t mtype, uint8_t dir,
 
 	bzero(&sdst, sizeof(sdst));
 	bzero(&dmask, sizeof(dmask));
-	if ((saptr = addr2sa(dst, 0)))
-		memcpy(&sdst, saptr, sizeof(sdst));
+	if ((saptr = addr2sa(dst, 0, &salen))) {
+		memcpy(&sdst, saptr, salen);
+		sdst.ss_len = salen;
+	}
 	switch (dst->aid) {
 	case AID_INET:
 		memset(&((struct sockaddr_in *)&dmask)->sin_addr, 0xff, 32/8);
@@ -146,7 +152,7 @@ pfkey_send(int sd, uint8_t satype, uint8_t mtype, uint8_t dir,
 		sa.sadb_sa_exttype = SADB_EXT_SA;
 		sa.sadb_sa_len = sizeof(sa) / 8;
 		sa.sadb_sa_replay = 0;
-		sa.sadb_sa_spi = spi;
+		sa.sadb_sa_spi = htonl(spi);
 		sa.sadb_sa_state = SADB_SASTATE_MATURE;
 		break;
 	case SADB_X_ADDFLOW:
@@ -407,6 +413,8 @@ pfkey_read(int sd, struct sadb_msg *h)
 	struct sadb_msg hdr;
 
 	if (recv(sd, &hdr, sizeof(hdr), MSG_PEEK) != sizeof(hdr)) {
+		if (errno == EAGAIN || errno == EINTR)
+			return (0);
 		log_warn("pfkey peek");
 		return (-1);
 	}
@@ -421,6 +429,8 @@ pfkey_read(int sd, struct sadb_msg *h)
 
 	/* not ours, discard */
 	if (read(sd, &hdr, sizeof(hdr)) == -1) {
+		if (errno == EAGAIN || errno == EINTR)
+			return (0);
 		log_warn("pfkey read");
 		return (-1);
 	}
@@ -429,7 +439,7 @@ pfkey_read(int sd, struct sadb_msg *h)
 }
 
 int
-pfkey_reply(int sd, u_int32_t *spip)
+pfkey_reply(int sd, u_int32_t *spi)
 {
 	struct sadb_msg hdr, *msg;
 	struct sadb_ext *ext;
@@ -453,22 +463,21 @@ pfkey_reply(int sd, u_int32_t *spip)
 			return (-1);
 		}
 	}
-	len = hdr.sadb_msg_len * PFKEY2_CHUNK;
-	if ((data = malloc(len)) == NULL) {
+	if ((data = reallocarray(NULL, hdr.sadb_msg_len, PFKEY2_CHUNK))
+	    == NULL) {
 		log_warn("pfkey malloc");
 		return (-1);
 	}
+	len = hdr.sadb_msg_len * PFKEY2_CHUNK;
 	if (read(sd, data, len) != len) {
 		log_warn("pfkey read");
-		bzero(data, len);
-		free(data);
+		freezero(data, len);
 		return (-1);
 	}
 
 	if (hdr.sadb_msg_type == SADB_GETSPI) {
-		if (spip == NULL) {
-			bzero(data, len);
-			free(data);
+		if (spi == NULL) {
+			freezero(data, len);
 			return (0);
 		}
 
@@ -480,13 +489,12 @@ pfkey_reply(int sd, u_int32_t *spip)
 		    ext->sadb_ext_len * PFKEY2_CHUNK)) {
 			if (ext->sadb_ext_type == SADB_EXT_SA) {
 				sa = (struct sadb_sa *) ext;
-				*spip = sa->sadb_sa_spi;
+				*spi = ntohl(sa->sadb_sa_spi);
 				break;
 			}
 		}
 	}
-	bzero(data, len);
-	free(data);
+	freezero(data, len);
 	return (0);
 }
 
@@ -734,7 +742,8 @@ pfkey_remove(struct peer *p)
 int
 pfkey_init(struct bgpd_sysdep *sysdep)
 {
-	if ((fd = socket(PF_KEY, SOCK_RAW, PF_KEY_V2)) == -1) {
+	if ((fd = socket(PF_KEY, SOCK_RAW | SOCK_CLOEXEC | SOCK_NONBLOCK,
+	    PF_KEY_V2)) == -1) {
 		if (errno == EPROTONOSUPPORT) {
 			log_warnx("PF_KEY not available, disabling ipsec");
 			sysdep->no_pfkey = 1;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.71 2012/04/12 17:26:09 claudio Exp $ */
+/*	$OpenBSD: control.c,v 1.95 2019/02/12 13:30:39 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -27,6 +27,7 @@
 
 #include "bgpd.h"
 #include "session.h"
+#include "log.h"
 
 #define	CONTROL_BACKLOG	5
 
@@ -34,6 +35,33 @@ struct ctl_conn	*control_connbyfd(int);
 struct ctl_conn	*control_connbypid(pid_t);
 int		 control_close(int);
 void		 control_result(struct ctl_conn *, u_int);
+ssize_t		 imsg_read_nofd(struct imsgbuf *);
+
+int
+control_check(char *path)
+{
+	struct sockaddr_un	 sun;
+	int			 fd;
+
+	bzero(&sun, sizeof(sun));
+	sun.sun_family = AF_UNIX;
+	strlcpy(sun.sun_path, path, sizeof(sun.sun_path));
+
+	if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+		log_warn("%s: socket", __func__);
+		return (-1);
+	}
+
+	if (connect(fd, (struct sockaddr *)&sun, sizeof(sun)) == 0) {
+		log_warnx("control socket %s already in use", path);
+		close(fd);
+		return (-1);
+	}
+
+	close(fd);
+
+	return (0);
+}
 
 int
 control_init(int restricted, char *path)
@@ -42,14 +70,20 @@ control_init(int restricted, char *path)
 	int			 fd;
 	mode_t			 old_umask, mode;
 
-	if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+	if ((fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
+	     0)) == -1) {
 		log_warn("control_init: socket");
 		return (-1);
 	}
 
 	bzero(&sun, sizeof(sun));
 	sun.sun_family = AF_UNIX;
-	strlcpy(sun.sun_path, path, sizeof(sun.sun_path));
+	if (strlcpy(sun.sun_path, path, sizeof(sun.sun_path)) >=
+	    sizeof(sun.sun_path)) {
+		log_warn("control_init: socket name too long");
+		close(fd);
+		return (-1);
+	}
 
 	if (unlink(path) == -1)
 		if (errno != ENOENT) {
@@ -82,8 +116,6 @@ control_init(int restricted, char *path)
 		return (-1);
 	}
 
-	session_socket_blockmode(fd, BM_NONBLOCK);
-
 	return (fd);
 }
 
@@ -104,13 +136,6 @@ control_shutdown(int fd)
 	close(fd);
 }
 
-void
-control_cleanup(const char *path)
-{
-	if (path)
-		unlink(path);
-}
-
 unsigned int
 control_accept(int listenfd, int restricted)
 {
@@ -120,17 +145,17 @@ control_accept(int listenfd, int restricted)
 	struct ctl_conn		*ctl_conn;
 
 	len = sizeof(sun);
-	if ((connfd = accept(listenfd,
-	    (struct sockaddr *)&sun, &len)) == -1) {
+	if ((connfd = accept4(listenfd,
+	    (struct sockaddr *)&sun, &len,
+	    SOCK_NONBLOCK | SOCK_CLOEXEC)) == -1) {
 		if (errno == ENFILE || errno == EMFILE) {
 			pauseaccept = getmonotime();
 			return (0);
-		} else if (errno != EWOULDBLOCK && errno != EINTR)
+		} else if (errno != EWOULDBLOCK && errno != EINTR &&
+		    errno != ECONNABORTED)
 			log_warn("control_accept: accept");
 		return (0);
 	}
-
-	session_socket_blockmode(connfd, BM_NONBLOCK);
 
 	if ((ctl_conn = calloc(1, sizeof(struct ctl_conn))) == NULL) {
 		log_warn("control_accept");
@@ -151,9 +176,10 @@ control_connbyfd(int fd)
 {
 	struct ctl_conn	*c;
 
-	for (c = TAILQ_FIRST(&ctl_conns); c != NULL && c->ibuf.fd != fd;
-	    c = TAILQ_NEXT(c, entry))
-		;	/* nothing */
+	TAILQ_FOREACH(c, &ctl_conns, entry) {
+		if (c->ibuf.fd == fd)
+			break;
+	}
 
 	return (c);
 }
@@ -163,9 +189,10 @@ control_connbypid(pid_t pid)
 {
 	struct ctl_conn	*c;
 
-	for (c = TAILQ_FIRST(&ctl_conns); c != NULL && c->ibuf.pid != pid;
-	    c = TAILQ_NEXT(c, entry))
-		;	/* nothing */
+	TAILQ_FOREACH(c, &ctl_conns, entry) {
+		if (c->ibuf.pid == pid)
+			break;
+	}
 
 	return (c);
 }
@@ -179,6 +206,9 @@ control_close(int fd)
 		log_warn("control_close: fd %d: not found", fd);
 		return (0);
 	}
+
+	if (c->terminate && c->ibuf.pid)
+		imsg_ctl_rde(IMSG_CTL_TERMINATE, c->ibuf.pid, NULL, 0);
 
 	msgbuf_clear(&c->ibuf.w);
 	TAILQ_REMOVE(&ctl_conns, c, entry);
@@ -195,7 +225,7 @@ control_dispatch_msg(struct pollfd *pfd, u_int *ctl_cnt)
 	struct imsg		 imsg;
 	struct ctl_conn		*c;
 	ssize_t			 n;
-	int			 verbose;
+	int			 verbose, matched;
 	struct peer		*p;
 	struct ctl_neighbor	*neighbor;
 	struct ctl_show_rib_request	*ribreq;
@@ -205,16 +235,22 @@ control_dispatch_msg(struct pollfd *pfd, u_int *ctl_cnt)
 		return (0);
 	}
 
-	if (pfd->revents & POLLOUT)
-		if (msgbuf_write(&c->ibuf.w) < 0) {
+	if (pfd->revents & POLLOUT) {
+		if (msgbuf_write(&c->ibuf.w) <= 0 && errno != EAGAIN) {
 			*ctl_cnt -= control_close(pfd->fd);
 			return (1);
 		}
+		if (c->throttled && c->ibuf.w.queued < CTL_MSG_LOW_MARK) {
+			if (imsg_ctl_rde(IMSG_XON, c->ibuf.pid, NULL, 0) != -1)
+				c->throttled = 0;
+		}
+	}
 
 	if (!(pfd->revents & POLLIN))
 		return (0);
 
-	if ((n = imsg_read(&c->ibuf)) == -1 || n == 0) {
+	if (((n = imsg_read_nofd(&c->ibuf)) == -1 && errno != EAGAIN) ||
+	    n == 0) {
 		*ctl_cnt -= control_close(pfd->fd);
 		return (1);
 	}
@@ -233,14 +269,12 @@ control_dispatch_msg(struct pollfd *pfd, u_int *ctl_cnt)
 			case IMSG_CTL_SHOW_NEIGHBOR:
 			case IMSG_CTL_SHOW_NEXTHOP:
 			case IMSG_CTL_SHOW_INTERFACE:
-			case IMSG_CTL_SHOW_RIB:
-			case IMSG_CTL_SHOW_RIB_AS:
-			case IMSG_CTL_SHOW_RIB_PREFIX:
 			case IMSG_CTL_SHOW_RIB_MEM:
-			case IMSG_CTL_SHOW_RIB_COMMUNITY:
-			case IMSG_CTL_SHOW_NETWORK:
 			case IMSG_CTL_SHOW_TERSE:
 			case IMSG_CTL_SHOW_TIMER:
+			case IMSG_CTL_SHOW_NETWORK:
+			case IMSG_CTL_SHOW_RIB:
+			case IMSG_CTL_SHOW_RIB_PREFIX:
 				break;
 			default:
 				/* clear imsg type to prevent processing */
@@ -254,24 +288,36 @@ control_dispatch_msg(struct pollfd *pfd, u_int *ctl_cnt)
 		case IMSG_NONE:
 			/* message was filtered out, nothing to do */
 			break;
+		case IMSG_CTL_FIB_COUPLE:
+		case IMSG_CTL_FIB_DECOUPLE:
+			imsg_ctl_parent(imsg.hdr.type, imsg.hdr.peerid,
+			    0, NULL, 0);
+			break;
+		case IMSG_CTL_SHOW_TERSE:
+			for (p = peers; p != NULL; p = p->next)
+				imsg_compose(&c->ibuf, IMSG_CTL_SHOW_NEIGHBOR,
+				    0, 0, -1, p, sizeof(struct peer));
+			imsg_compose(&c->ibuf, IMSG_CTL_END, 0, 0, -1, NULL, 0);
+			break;
 		case IMSG_CTL_SHOW_NEIGHBOR:
 			c->ibuf.pid = imsg.hdr.pid;
+
 			if (imsg.hdr.len == IMSG_HEADER_SIZE +
 			    sizeof(struct ctl_neighbor)) {
 				neighbor = imsg.data;
-				p = getpeerbyaddr(&neighbor->addr);
-				if (p == NULL)
-					p = getpeerbydesc(neighbor->descr);
-				if (p == NULL) {
-					control_result(c, CTL_RES_NOSUCHPEER);
-					break;
-				}
-				if (!neighbor->show_timers) {
-					imsg_compose_rde(imsg.hdr.type,
+				neighbor->descr[PEER_DESCR_LEN - 1] = 0;
+			} else {
+				neighbor = NULL;
+			}
+			for (matched = 0, p = peers; p != NULL; p = p->next) {
+				if (!peer_matched(p, neighbor))
+					continue;
+
+				matched = 1;
+				if (!neighbor || !neighbor->show_timers) {
+					imsg_ctl_rde(imsg.hdr.type,
 					    imsg.hdr.pid,
 					    p, sizeof(struct peer));
-					imsg_compose_rde(IMSG_CTL_END,
-					    imsg.hdr.pid, NULL, 0);
 				} else {
 					u_int			 i;
 					time_t			 d;
@@ -289,54 +335,58 @@ control_dispatch_msg(struct pollfd *pfd, u_int *ctl_cnt)
 						    IMSG_CTL_SHOW_TIMER,
 						    0, 0, -1, &ct, sizeof(ct));
 					}
-					imsg_compose(&c->ibuf, IMSG_CTL_END,
-					    0, 0, -1, NULL, 0);
 				}
-			} else {
-				for (p = peers; p != NULL; p = p->next)
-					imsg_compose_rde(imsg.hdr.type,
-					    imsg.hdr.pid,
-					    p, sizeof(struct peer));
-				imsg_compose_rde(IMSG_CTL_END, imsg.hdr.pid,
-					NULL, 0);
 			}
-			break;
-		case IMSG_CTL_SHOW_TERSE:
-			for (p = peers; p != NULL; p = p->next)
-				imsg_compose(&c->ibuf, IMSG_CTL_SHOW_NEIGHBOR,
-				    0, 0, -1, p, sizeof(struct peer));
-			imsg_compose(&c->ibuf, IMSG_CTL_END, 0, 0, -1, NULL, 0);
-			break;
-		case IMSG_CTL_FIB_COUPLE:
-		case IMSG_CTL_FIB_DECOUPLE:
-			imsg_compose_parent(imsg.hdr.type, imsg.hdr.peerid,
-			    0, NULL, 0);
+			if (!matched && peers != NULL) {
+				control_result(c, CTL_RES_NOSUCHPEER);
+			} else if (!neighbor || !neighbor->show_timers) {
+				imsg_ctl_rde(IMSG_CTL_END, imsg.hdr.pid,
+				    NULL, 0);
+			} else {
+				imsg_compose(&c->ibuf, IMSG_CTL_END, 0, 0, -1,
+				    NULL, 0);
+			}
 			break;
 		case IMSG_CTL_NEIGHBOR_UP:
 		case IMSG_CTL_NEIGHBOR_DOWN:
 		case IMSG_CTL_NEIGHBOR_CLEAR:
 		case IMSG_CTL_NEIGHBOR_RREFRESH:
-			if (imsg.hdr.len == IMSG_HEADER_SIZE +
+		case IMSG_CTL_NEIGHBOR_DESTROY:
+			if (imsg.hdr.len != IMSG_HEADER_SIZE +
 			    sizeof(struct ctl_neighbor)) {
-				neighbor = imsg.data;
-				neighbor->descr[PEER_DESCR_LEN - 1] = 0;
-				p = getpeerbyaddr(&neighbor->addr);
-				if (p == NULL)
-					p = getpeerbydesc(neighbor->descr);
-				if (p == NULL) {
-					control_result(c, CTL_RES_NOSUCHPEER);
-					break;
-				}
+				log_warnx("got IMSG_CTL_NEIGHBOR_ with "
+				    "wrong length");
+				break;
+			}
+
+			neighbor = imsg.data;
+			neighbor->descr[PEER_DESCR_LEN - 1] = 0;
+
+			for (matched = 0, p = peers; p != NULL; p = p->next) {
+				if (!peer_matched(p, neighbor))
+					continue;
+
+				matched = 1;
+
 				switch (imsg.hdr.type) {
 				case IMSG_CTL_NEIGHBOR_UP:
 					bgp_fsm(p, EVNT_START);
+					p->conf.down = 0;
+					p->conf.shutcomm[0] = '\0';
 					control_result(c, CTL_RES_OK);
 					break;
 				case IMSG_CTL_NEIGHBOR_DOWN:
+					p->conf.down = 1;
+					strlcpy(p->conf.shutcomm,
+					    neighbor->shutcomm,
+					    sizeof(neighbor->shutcomm));
 					session_stop(p, ERR_CEASE_ADMIN_DOWN);
 					control_result(c, CTL_RES_OK);
 					break;
 				case IMSG_CTL_NEIGHBOR_CLEAR:
+					strlcpy(p->conf.shutcomm,
+					    neighbor->shutcomm,
+					    sizeof(neighbor->shutcomm));
 					if (!p->conf.down) {
 						session_stop(p,
 						    ERR_CEASE_ADMIN_RESET);
@@ -355,82 +405,86 @@ control_dispatch_msg(struct pollfd *pfd, u_int *ctl_cnt)
 					else
 						control_result(c, CTL_RES_OK);
 					break;
+				case IMSG_CTL_NEIGHBOR_DESTROY:
+					if (!p->template)
+						control_result(c,
+						    CTL_RES_BADPEER);
+					else if (p->state != STATE_IDLE)
+						control_result(c,
+						    CTL_RES_BADSTATE);
+					else {
+						/*
+						 * Mark as deleted, will be
+						 * collected on next poll loop.
+						 */
+						p->conf.reconf_action =
+						    RECONF_DELETE;
+						control_result(c, CTL_RES_OK);
+					}
+					break;
 				default:
 					fatal("king bula wants more humppa");
 				}
-			} else
-				log_warnx("got IMSG_CTL_NEIGHBOR_ with "
-				    "wrong length");
+			}
+			if (!matched)
+				control_result(c, CTL_RES_NOSUCHPEER);
 			break;
 		case IMSG_CTL_RELOAD:
 		case IMSG_CTL_SHOW_INTERFACE:
 		case IMSG_CTL_SHOW_FIB_TABLES:
 			c->ibuf.pid = imsg.hdr.pid;
-			imsg_compose_parent(imsg.hdr.type, 0, imsg.hdr.pid,
+			imsg_ctl_parent(imsg.hdr.type, 0, imsg.hdr.pid,
 			    imsg.data, imsg.hdr.len - IMSG_HEADER_SIZE);
 			break;
 		case IMSG_CTL_KROUTE:
 		case IMSG_CTL_KROUTE_ADDR:
 		case IMSG_CTL_SHOW_NEXTHOP:
 			c->ibuf.pid = imsg.hdr.pid;
-			imsg_compose_parent(imsg.hdr.type, imsg.hdr.peerid,
+			imsg_ctl_parent(imsg.hdr.type, imsg.hdr.peerid,
 			    imsg.hdr.pid, imsg.data, imsg.hdr.len -
 			    IMSG_HEADER_SIZE);
 			break;
 		case IMSG_CTL_SHOW_RIB:
-		case IMSG_CTL_SHOW_RIB_AS:
 		case IMSG_CTL_SHOW_RIB_PREFIX:
-			if (imsg.hdr.len == IMSG_HEADER_SIZE +
+			if (imsg.hdr.len != IMSG_HEADER_SIZE +
 			    sizeof(struct ctl_show_rib_request)) {
-				ribreq = imsg.data;
-				neighbor = &ribreq->neighbor;
-				neighbor->descr[PEER_DESCR_LEN - 1] = 0;
-				ribreq->peerid = 0;
-				p = NULL;
-				if (neighbor->addr.aid) {
-					p = getpeerbyaddr(&neighbor->addr);
-					if (p == NULL) {
-						control_result(c,
-						    CTL_RES_NOSUCHPEER);
-						break;
-					}
-					ribreq->peerid = p->conf.id;
-				} else if (neighbor->descr[0]) {
-					p = getpeerbydesc(neighbor->descr);
-					if (p == NULL) {
-						control_result(c,
-						    CTL_RES_NOSUCHPEER);
-						break;
-					}
-					ribreq->peerid = p->conf.id;
-				}
-				if ((ribreq->flags & F_CTL_ADJ_IN) && p &&
-				    !p->conf.softreconfig_in) {
-					/*
-					 * if no neighbor was specified we
-					 * try our best.
-					 */
-					control_result(c, CTL_RES_NOCAP);
-					break;
-				}
-				if ((imsg.hdr.type == IMSG_CTL_SHOW_RIB_PREFIX)
-				    && (ribreq->prefix.aid == AID_UNSPEC)) {
-					/* malformed request, must specify af */
-					control_result(c, CTL_RES_PARSE_ERROR);
-					break;
-				}
-				c->ibuf.pid = imsg.hdr.pid;
-				imsg_compose_rde(imsg.hdr.type, imsg.hdr.pid,
-				    imsg.data, imsg.hdr.len - IMSG_HEADER_SIZE);
-			} else
 				log_warnx("got IMSG_CTL_SHOW_RIB with "
 				    "wrong length");
-			break;
-		case IMSG_CTL_SHOW_RIB_MEM:
-		case IMSG_CTL_SHOW_RIB_COMMUNITY:
-		case IMSG_CTL_SHOW_NETWORK:
+				break;
+			}
+
+			ribreq = imsg.data;
+			neighbor = &ribreq->neighbor;
+			neighbor->descr[PEER_DESCR_LEN - 1] = 0;
+
+			/* check if at least one neighbor exists */
+			for (p = peers; p != NULL; p = p->next)
+				if (peer_matched(p, neighbor))
+					break;
+			if (p == NULL && peers != NULL) {
+				control_result(c, CTL_RES_NOSUCHPEER);
+				break;
+			}
+
+			if ((imsg.hdr.type == IMSG_CTL_SHOW_RIB_PREFIX)
+			    && (ribreq->prefix.aid == AID_UNSPEC)) {
+				/* malformed request, must specify af */
+				control_result(c, CTL_RES_PARSE_ERROR);
+				break;
+			}
+
 			c->ibuf.pid = imsg.hdr.pid;
-			imsg_compose_rde(imsg.hdr.type, imsg.hdr.pid,
+			c->terminate = 1;
+
+			imsg_ctl_rde(imsg.hdr.type, imsg.hdr.pid,
+			    imsg.data, imsg.hdr.len - IMSG_HEADER_SIZE);
+			break;
+		case IMSG_CTL_SHOW_NETWORK:
+			c->terminate = 1;
+			/* FALLTHROUGH */
+		case IMSG_CTL_SHOW_RIB_MEM:
+			c->ibuf.pid = imsg.hdr.pid;
+			imsg_ctl_rde(imsg.hdr.type, imsg.hdr.pid,
 			    imsg.data, imsg.hdr.len - IMSG_HEADER_SIZE);
 			break;
 		case IMSG_NETWORK_ADD:
@@ -440,7 +494,7 @@ control_dispatch_msg(struct pollfd *pfd, u_int *ctl_cnt)
 		case IMSG_NETWORK_FLUSH:
 		case IMSG_NETWORK_DONE:
 		case IMSG_FILTER_SET:
-			imsg_compose_rde(imsg.hdr.type, 0,
+			imsg_ctl_rde(imsg.hdr.type, 0,
 			    imsg.data, imsg.hdr.len - IMSG_HEADER_SIZE);
 			break;
 		case IMSG_CTL_LOG_VERBOSE:
@@ -449,13 +503,13 @@ control_dispatch_msg(struct pollfd *pfd, u_int *ctl_cnt)
 				break;
 
 			/* forward to other processes */
-			imsg_compose_parent(imsg.hdr.type, 0, imsg.hdr.pid,
+			imsg_ctl_parent(imsg.hdr.type, 0, imsg.hdr.pid,
 			    imsg.data, imsg.hdr.len - IMSG_HEADER_SIZE);
-			imsg_compose_rde(imsg.hdr.type, 0,
+			imsg_ctl_rde(imsg.hdr.type, 0,
 			    imsg.data, imsg.hdr.len - IMSG_HEADER_SIZE);
 
 			memcpy(&verbose, imsg.data, sizeof(verbose));
-			log_verbose(verbose);
+			log_setverbose(verbose);
 			break;
 		default:
 			break;
@@ -474,6 +528,15 @@ control_imsg_relay(struct imsg *imsg)
 	if ((c = control_connbypid(imsg->hdr.pid)) == NULL)
 		return (0);
 
+	/* if command finished no need to send exit message */
+	if (imsg->hdr.type == IMSG_CTL_END || imsg->hdr.type == IMSG_CTL_RESULT)
+		c->terminate = 0;
+
+	if (!c->throttled && c->ibuf.w.queued > CTL_MSG_HIGH_MARK) {
+		if (imsg_ctl_rde(IMSG_XOFF, imsg->hdr.pid, NULL, 0) != -1)
+			c->throttled = 1;
+	}
+
 	return (imsg_compose(&c->ibuf, imsg->hdr.type, 0, imsg->hdr.pid, -1,
 	    imsg->data, imsg->hdr.len - IMSG_HEADER_SIZE));
 }
@@ -483,4 +546,24 @@ control_result(struct ctl_conn *c, u_int code)
 {
 	imsg_compose(&c->ibuf, IMSG_CTL_RESULT, 0, c->ibuf.pid, -1,
 	    &code, sizeof(code));
+}
+
+/* This should go into libutil, from smtpd/mproc.c */
+ssize_t
+imsg_read_nofd(struct imsgbuf *ibuf)
+{
+	ssize_t	 n;
+	char	*buf;
+	size_t	 len;
+
+	buf = ibuf->r.buf + ibuf->r.wpos;
+	len = sizeof(ibuf->r.buf) - ibuf->r.wpos;
+
+	while ((n = recv(ibuf->fd, buf, len, 0)) == -1) {
+		if (errno != EINTR)
+			return (n);
+	}
+
+	ibuf->r.wpos += n;
+	return (n);
 }
