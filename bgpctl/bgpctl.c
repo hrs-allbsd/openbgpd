@@ -162,6 +162,8 @@ main(int argc, char *argv[])
 		err(1, "asprintf");
 #else
 	tableid = 0;
+	if (asprintf(&sockname, "%s", SOCKET_NAME) == -1)
+		err(1, "asprintf");
 #endif
 
 	while ((ch = getopt(argc, argv, "ns:")) != -1) {
