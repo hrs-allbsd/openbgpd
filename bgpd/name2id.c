@@ -1,4 +1,4 @@
-/*	$OpenBSD: name2id.c,v 1.9 2009/06/04 04:46:42 claudio Exp $ */
+/*	$OpenBSD: name2id.c,v 1.8 2009/05/17 12:25:15 claudio Exp $ */
 
 /*
  * Copyright (c) 2004, 2005 Henning Brauer <henning@openbsd.org>

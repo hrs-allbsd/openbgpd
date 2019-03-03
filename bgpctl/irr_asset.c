@@ -1,4 +1,4 @@
-/*	$OpenBSD: irr_asset.c,v 1.8 2009/04/14 21:10:54 jj Exp $ */
+/*	$OpenBSD: irr_asset.c,v 1.7 2007/03/31 12:46:55 henning Exp $ */
 
 /*
  * Copyright (c) 2007 Henning Brauer <henning@openbsd.org>
