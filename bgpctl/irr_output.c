@@ -1,4 +1,4 @@
-/*	$OpenBSD: irr_output.c,v 1.13 2007/03/05 17:28:21 henning Exp $ */
+/*	$OpenBSD: irr_output.c,v 1.12 2007/03/05 15:02:05 henning Exp $ */
 
 /*
  * Copyright (c) 2007 Henning Brauer <henning@openbsd.org>
