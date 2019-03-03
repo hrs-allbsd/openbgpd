@@ -68,7 +68,8 @@ char *qtype_opts[] = {
 	"",
 	"-T aut-num",
 	"-K -T as-set",
-	"-K -T route -i origin"
+	"-K -T route -i origin",
+	"-K -T route6 -i origin"
 };
 
 char	*server = "whois.radb.net";
